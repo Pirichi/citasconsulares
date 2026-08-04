@@ -1,6 +1,7 @@
 import os
 import time
 import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 
 # Variables de entorno
@@ -32,29 +33,21 @@ def send_telegram_notification(message):
             print(f"Error enviando mensaje a Telegram ID {chat_id}: {e}")
 
 def check_appointments():
-    # Encabezados completos para imitar un navegador Chrome real
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Cache-Control": "max-age=0",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1"
-    }
-    
     try:
-        session = requests.Session()
-        response = session.get(URL_CONSULADO, headers=headers, timeout=15)
+        # Crea una sesión de cloudscraper imitando a un navegador Chrome en Windows
+        scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            }
+        )
         
-        # Omitir si el servidor está saturado
+        response = scraper.get(URL_CONSULADO, timeout=15)
+        
+        # Omitir el ciclo si el servidor del consulado está saturado o caído
         if response.status_code in [502, 503, 504]:
-            print(f"Servidor saturado (HTTP {response.status_code}). Reintentando...")
+            print(f"Servidor saturado (HTTP {response.status_code}). Reintentando en el próximo ciclo...")
             return
 
         response.raise_for_status()
@@ -62,6 +55,7 @@ def check_appointments():
         soup = BeautifulSoup(response.text, "html.parser")
         page_text = soup.get_text().lower()
         
+        # Verificación de disponibilidad de citas
         if "no hay citas disponibles" not in page_text and "no existen huecos" not in page_text:
             msg = (
                 "🚨 **¡POSIBLE CITA DISPONIBLE!** 🚨\n\n"
@@ -73,12 +67,12 @@ def check_appointments():
         else:
             print("Sin citas disponibles por el momento.")
 
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         print(f"Error de red/conexión: {e}")
 
 def main():
-    print("Iniciando monitor de citas multiusuario...")
-    send_telegram_notification("🤖 **Monitor de citas activado en Railway.** Te avisaré en cuanto haya cambios.")
+    print("Iniciando monitor de citas con bypass de Cloudflare...")
+    send_telegram_notification("🤖 **Monitor de citas activado en Railway (con bypass anti-bloqueo).** Te avisaré en cuanto haya cambios.")
     
     while True:
         check_appointments()
@@ -86,4 +80,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+            
