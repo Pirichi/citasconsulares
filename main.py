@@ -60,20 +60,18 @@ def check_with_browser():
         try:
             now_str = datetime.now().strftime('%H:%M:%S')
             print(f"[{now_str}] Navegando al sitio...")
-            page.goto(WIDGET_URL, wait_until="networkidle", timeout=60000)
+            page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=60000)
 
-            # Esperar a que el contenedor principal cargue
-            page.wait_for_timeout(5000)
+            # Esperar 6 segundos a que el widget cargue su texto
+            page.wait_for_timeout(6000)
 
             content = page.content().lower()
 
-            # Verificamos si la pantalla sigue mostrando la negativa
             no_hay_citas = "no hay horas disponibles" in content or "no hay citas" in content
 
             if no_hay_citas:
                 print(f"[{now_str}] → Confirmado: No hay citas disponibles actualmente.")
             else:
-                # Si el texto de "no hay horas" desapareció, ¡hay hueco!
                 print(f"[{now_str}] 🎉 ¡ATENCIÓN! El mensaje de 'no hay citas' desapareció.")
                 
                 msg = "🚨 *¡CITAS DISPONIBLES!* 🚨\n\n"
