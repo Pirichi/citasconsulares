@@ -4,13 +4,15 @@ import json
 import calendar
 import requests
 from datetime import datetime
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ====================== CONFIGURACIÓN ======================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 RAW_CHAT_IDS = os.getenv("TELEGRAM_CHAT_ID", "")
 TELEGRAM_CHAT_IDS = [cid.strip() for cid in RAW_CHAT_IDS.split(",") if cid.strip()]
 
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "120"))
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "150"))
 
 PUBLIC_KEY = "2f9880d8d5b8feb958c81d2a08157bcf1"
 SERVICE_ID = "bkt871926"
@@ -18,136 +20,154 @@ WIDGET_URL = f"https://www.citaconsular.es/es/hosteds/widgetdefault/{PUBLIC_KEY}
 
 # ===========================================================
 
-def send_telegram(message: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
-        print("⚠️ Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID")
-        return
+def create_session():
+    session = requests.Session()
+    retry = Retry(total=2, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    for chat_id in TELEGRAM_CHAT_IDS:
-        payload = {
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": True
-        }
-        try:
-            r = requests.post(url, json=payload, timeout=12)
-            r.raise_for_status()
-            print(f"✅ Notificación enviada a {chat_id}")
-        except Exception as e:
-            print(f"❌ Error Telegram {chat_id}: {e}")
-
-def get_available_slots(start_date: str, end_date: str) -> list:
-    headers = {
+    session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Accept": "*/*",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
         "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
         "Referer": WIDGET_URL,
         "Origin": "https://www.citaconsular.es",
-    }
+        "Connection": "keep-alive",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "X-Requested-With": "XMLHttpRequest",
+    })
+    return session
 
-    params = {
-        "callback": "",
-        "type": "default",
-        "publickey": PUBLIC_KEY,
-        "lang": "es",
-        "services[]": SERVICE_ID,
-        "agendas[]": SERVICE_ID,
-        "src": WIDGET_URL,
-        "start": start_date,
-        "end": end_date,
-    }
-
-    try:
-        response = requests.get(
-            "https://www.citaconsular.es/onlinebookings/datetime/",
-            headers=headers,
-            params=params,
-            timeout=25
-        )
-
-        print(f"→ Status: {response.status_code} | Length: {len(response.text)}")
-
-        if response.status_code != 200:
-            print(f"⚠️ Respuesta no 200. Primeros 300 chars:\n{response.text[:300]}")
-            return []
-
-        text = response.text.strip()
-
-        if not text:
-            print("⚠️ Respuesta vacía")
-            return []
-
-        # Intentamos extraer el JSON de diferentes formatos posibles
+def send_telegram(message: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    for chat_id in TELEGRAM_CHAT_IDS:
         try:
-            # Caso 1: JSON puro
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            # Caso 2: JSONP tipo callback({...}) o ({...})
+            requests.post(url, json={
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": True
+            }, timeout=12)
+            print(f"✅ Notificación enviada a {chat_id}")
+        except Exception as e:
+            print(f"❌ Error Telegram: {e}")
+
+def get_available_slots(session, start_date: str, end_date: str) -> list:
+    # Probamos varias combinaciones de parámetros
+    param_sets = [
+        # Combinación 1 (la más común)
+        {
+            "callback": "",
+            "type": "default",
+            "publickey": PUBLIC_KEY,
+            "lang": "es",
+            "services[]": SERVICE_ID,
+            "agendas[]": SERVICE_ID,
+            "src": WIDGET_URL,
+            "start": start_date,
+            "end": end_date,
+        },
+        # Combinación 2 (sin agendas)
+        {
+            "callback": "",
+            "type": "default",
+            "publickey": PUBLIC_KEY,
+            "lang": "es",
+            "services[]": SERVICE_ID,
+            "src": WIDGET_URL,
+            "start": start_date,
+            "end": end_date,
+        },
+        # Combinación 3 (formato más simple)
+        {
+            "publickey": PUBLIC_KEY,
+            "lang": "es",
+            "type": "default",
+            "start": start_date,
+            "end": end_date,
+            "services[]": SERVICE_ID,
+        },
+    ]
+
+    for i, params in enumerate(param_sets, 1):
+        try:
+            response = session.get(
+                "https://www.citaconsular.es/onlinebookings/datetime/",
+                params=params,
+                timeout=20
+            )
+
+            print(f"→ Intento {i} | Status: {response.status_code} | Length: {len(response.text)}")
+
+            if response.status_code != 200 or not response.text.strip():
+                continue
+
+            text = response.text.strip()
+
+            # Intentamos parsear
             try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
                 start = text.find("{")
                 end = text.rfind("}") + 1
-                if start != -1 and end > start:
-                    data = json.loads(text[start:end])
-                else:
-                    print(f"⚠️ No se encontró JSON. Primeros 400 chars:\n{text[:400]}")
-                    return []
-            except Exception as e:
-                print(f"⚠️ Error parseando JSON: {e}")
-                print(f"Contenido recibido:\n{text[:400]}")
-                return []
+                if start == -1:
+                    print(f"   No JSON encontrado. Preview: {text[:150]}")
+                    continue
+                data = json.loads(text[start:end])
 
-        available = []
-        for slot in data.get("Slots", []):
-            times = slot.get("times")
-            if times:
-                available.append({
-                    "date": slot.get("date"),
-                    "times": times
-                })
+            available = []
+            for slot in data.get("Slots", []):
+                if slot.get("times"):
+                    available.append({
+                        "date": slot.get("date"),
+                        "times": slot["times"]
+                    })
 
-        return available
+            if available or "Slots" in data:
+                print(f"   ✅ Respuesta válida recibida (intento {i})")
+                return available
 
-    except Exception as e:
-        print(f"❌ Error de conexión: {e}")
-        return []
+        except Exception as e:
+            print(f"   Error en intento {i}: {e}")
+            continue
 
-def check_appointments():
+    return []
+
+def check_appointments(session):
     today = datetime.now().date()
-    months_to_check = []
-
+    months = []
     current = today.replace(day=1)
+
     for _ in range(3):
-        last_day = calendar.monthrange(current.year, current.month)[1]
-        end = current.replace(day=last_day)
-        months_to_check.append((
-            current.strftime("%Y-%m-%d"),
-            end.strftime("%Y-%m-%d")
-        ))
+        last = calendar.monthrange(current.year, current.month)[1]
+        end = current.replace(day=last)
+        months.append((current.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")))
         if current.month == 12:
             current = current.replace(year=current.year + 1, month=1)
         else:
             current = current.replace(month=current.month + 1)
 
     all_slots = []
-    for start, end in months_to_check:
-        slots = get_available_slots(start, end)
+    for start, end in months:
+        slots = get_available_slots(session, start, end)
         all_slots.extend(slots)
-        time.sleep(1)  # pequeña pausa entre meses
+        time.sleep(1.5)
 
     if all_slots:
-        msg = "🚨 *¡CITAS DISPONIBLES!* 🚨\n\n"
-        msg += "*Visado Familiar Comunitario - La Habana*\n\n"
+        msg = "🚨 *¡CITAS DISPONIBLES!* 🚨\n\n*Visado Familiar Comunitario - La Habana*\n\n"
         for s in all_slots[:8]:
-            times_str = ", ".join(s["times"][:5])
-            msg += f"📅 *{s['date']}* → {times_str}\n"
+            msg += f"📅 *{s['date']}* → {', '.join(s['times'][:5])}\n"
         msg += f"\n🔗 {WIDGET_URL}"
         print("🎉 ¡Citas encontradas!")
         send_telegram(msg)
     else:
-        now = datetime.now().strftime("%H:%M:%S")
-        print(f"{now} - Sin citas disponibles")
+        print(f"{datetime.now().strftime('%H:%M:%S')} - Sin citas disponibles")
 
 def main():
     print("=" * 55)
@@ -155,17 +175,23 @@ def main():
     print(f"Región: EU West | Intervalo: {CHECK_INTERVAL}s")
     print("=" * 55)
 
-    send_telegram(
-        "🤖 *Monitor reiniciado*\n\n"
-        "Visado Familiar Comunitario - La Habana\n"
-        f"Revisando cada {CHECK_INTERVAL} segundos."
-    )
+    session = create_session()
+
+    # Primero visitamos el widget para intentar conseguir cookies
+    try:
+        print("→ Visitando widget para obtener cookies...")
+        session.get(WIDGET_URL, timeout=15)
+        print("→ Cookies obtenidas")
+    except Exception as e:
+        print(f"→ No se pudieron obtener cookies: {e}")
+
+    send_telegram("🤖 *Monitor actualizado*\nVisado Familiar Comunitario - La Habana\nProbando múltiples combinaciones de parámetros.")
 
     while True:
         try:
-            check_appointments()
+            check_appointments(session)
         except Exception as e:
-            print(f"Error en el ciclo: {e}")
+            print(f"Error en ciclo: {e}")
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
