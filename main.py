@@ -62,24 +62,40 @@ def check_with_browser():
             print(f"[{now_str}] Navegando al sitio...")
             page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=60000)
 
-            # Esperar 6 segundos a que el widget cargue su texto
-            page.wait_for_timeout(6000)
+            # Esperar a que el contenedor principal del widget exista en el DOM
+            page.wait_for_selector("body", timeout=15000)
+            
+            # Dar tiempo suficiente (10 seg) para que la app SPA de Bookitit descargue el estado de la agenda
+            page.wait_for_timeout(10000)
 
             content = page.content().lower()
 
+            # Textos explícitos de "sin citas"
             no_hay_citas = "no hay horas disponibles" in content or "no hay citas" in content
+            
+            # Confirmación de que el widget terminó de cargar (debe tener el pie de marca o interfaz)
+            widget_cargado = "bookitit" in content or "consulado" in content
 
             if no_hay_citas:
                 print(f"[{now_str}] → Confirmado: No hay citas disponibles actualmente.")
+            elif widget_cargado:
+                # Si la interfaz cargó pero NO está el texto de "No hay horas", hacemos una pausa breve y re-confirmamos
+                page.wait_for_timeout(3000)
+                re_check_content = page.content().lower()
+                
+                if "no hay horas disponibles" not in re_check_content and "no hay citas" not in re_check_content:
+                    print(f"[{now_str}] 🎉 ¡ATENCIÓN REAL! Citas detectadas en pantalla.")
+                    
+                    msg = "🚨 *¡CITAS DISPONIBLES!* 🚨\n\n"
+                    msg += "*Visado Familiar Comunitario - La Habana*\n"
+                    msg += "Se ha detectado apertura real en la agenda del consulado.\n\n"
+                    msg += f"🔗 Entra de inmediato: {WIDGET_URL}"
+                    
+                    send_telegram(msg)
+                else:
+                    print(f"[{now_str}] → Falso positivo descartado tras re-verificación.")
             else:
-                print(f"[{now_str}] 🎉 ¡ATENCIÓN! El mensaje de 'no hay citas' desapareció.")
-                
-                msg = "🚨 *¡CITAS DISPONIBLES!* 🚨\n\n"
-                msg += "*Visado Familiar Comunitario - La Habana*\n"
-                msg += "Se ha detectado apertura en la agenda del consulado.\n\n"
-                msg += f"🔗 Entra de inmediato: {WIDGET_URL}"
-                
-                send_telegram(msg)
+                print(f"[{now_str}] ⚠️ El widget no terminó de renderizar en este ciclo. Reintentando en el próximo.")
 
         except Exception as e:
             print(f"❌ Error durante el chequeo: {e}")
@@ -89,14 +105,14 @@ def check_with_browser():
 def main():
     print("=" * 55)
     print("Monitor Visado Familiar Comunitario - La Habana")
-    print("Modo: Inspección Visual de DOM (Playwright)")
+    print("Modo: Anti-Falsos Positivos (Doble Verificación)")
     print(f"Intervalo: {CHECK_INTERVAL}s")
     print("=" * 55)
 
     send_telegram(
-        "🤖 *Monitor iniciado correctamente*\n"
+        "🤖 *Monitor actualizado (Sin falsos positivos)*\n"
         "Visado Familiar Comunitario - La Habana\n"
-        f"Revisando cada {CHECK_INTERVAL} segundos mediante lectura directa de pantalla."
+        f"Revisando cada {CHECK_INTERVAL} segundos con doble verificación visual."
     )
 
     while True:
