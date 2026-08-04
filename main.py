@@ -10,9 +10,8 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 RAW_CHAT_IDS = os.getenv("TELEGRAM_CHAT_ID", "")
 TELEGRAM_CHAT_IDS = [cid.strip() for cid in RAW_CHAT_IDS.split(",") if cid.strip()]
 
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "120"))  # segundos (recomendado 120-180)
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "120"))
 
-# Datos del Visado Familiar Comunitario - Consulado La Habana
 PUBLIC_KEY = "2f9880d8d5b8feb958c81d2a08157bcf1"
 SERVICE_ID = "bkt871926"
 WIDGET_URL = f"https://www.citaconsular.es/es/hosteds/widgetdefault/{PUBLIC_KEY}/{SERVICE_ID}"
@@ -20,13 +19,11 @@ WIDGET_URL = f"https://www.citaconsular.es/es/hosteds/widgetdefault/{PUBLIC_KEY}
 # ===========================================================
 
 def send_telegram(message: str):
-    """Envía notificación a todos los chat_id configurados"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
         print("⚠️ Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
     for chat_id in TELEGRAM_CHAT_IDS:
         payload = {
             "chat_id": chat_id,
@@ -39,17 +36,15 @@ def send_telegram(message: str):
             r.raise_for_status()
             print(f"✅ Notificación enviada a {chat_id}")
         except Exception as e:
-            print(f"❌ Error enviando a {chat_id}: {e}")
+            print(f"❌ Error Telegram {chat_id}: {e}")
 
 def get_available_slots(start_date: str, end_date: str) -> list:
-    """Consulta el endpoint real de disponibilidad"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         "Accept": "*/*",
         "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
         "Referer": WIDGET_URL,
         "Origin": "https://www.citaconsular.es",
-        "Connection": "keep-alive",
     }
 
     params = {
@@ -72,24 +67,41 @@ def get_available_slots(start_date: str, end_date: str) -> list:
             timeout=25
         )
 
+        print(f"→ Status: {response.status_code} | Length: {len(response.text)}")
+
         if response.status_code != 200:
-            print(f"⚠️ HTTP {response.status_code}")
+            print(f"⚠️ Respuesta no 200. Primeros 300 chars:\n{response.text[:300]}")
             return []
 
         text = response.text.strip()
 
-        # La respuesta suele venir como JSONP → extraemos el JSON
-        if text.startswith("(") or "({" in text:
-            json_str = text[text.find("{"): text.rfind("}") + 1]
-        else:
-            json_str = text
+        if not text:
+            print("⚠️ Respuesta vacía")
+            return []
 
-        data = json.loads(json_str)
+        # Intentamos extraer el JSON de diferentes formatos posibles
+        try:
+            # Caso 1: JSON puro
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            # Caso 2: JSONP tipo callback({...}) o ({...})
+            try:
+                start = text.find("{")
+                end = text.rfind("}") + 1
+                if start != -1 and end > start:
+                    data = json.loads(text[start:end])
+                else:
+                    print(f"⚠️ No se encontró JSON. Primeros 400 chars:\n{text[:400]}")
+                    return []
+            except Exception as e:
+                print(f"⚠️ Error parseando JSON: {e}")
+                print(f"Contenido recibido:\n{text[:400]}")
+                return []
+
         available = []
-
         for slot in data.get("Slots", []):
             times = slot.get("times")
-            if times:  # Solo si hay horas disponibles
+            if times:
                 available.append({
                     "date": slot.get("date"),
                     "times": times
@@ -98,11 +110,10 @@ def get_available_slots(start_date: str, end_date: str) -> list:
         return available
 
     except Exception as e:
-        print(f"❌ Error consultando endpoint: {e}")
+        print(f"❌ Error de conexión: {e}")
         return []
 
 def check_appointments():
-    """Revisa los próximos 3 meses"""
     today = datetime.now().date()
     months_to_check = []
 
@@ -114,7 +125,6 @@ def check_appointments():
             current.strftime("%Y-%m-%d"),
             end.strftime("%Y-%m-%d")
         ))
-        # Siguiente mes
         if current.month == 12:
             current = current.replace(year=current.year + 1, month=1)
         else:
@@ -124,18 +134,16 @@ def check_appointments():
     for start, end in months_to_check:
         slots = get_available_slots(start, end)
         all_slots.extend(slots)
+        time.sleep(1)  # pequeña pausa entre meses
 
     if all_slots:
-        msg = "🚨 *¡CITAS DISPONIBLES DETECTADAS!* 🚨\n\n"
+        msg = "🚨 *¡CITAS DISPONIBLES!* 🚨\n\n"
         msg += "*Visado Familiar Comunitario - La Habana*\n\n"
-
-        for s in all_slots[:10]:  # Máximo 10 fechas para no saturar
-            times_str = ", ".join(s["times"][:6])
-            msg += f"📅 *{s['date']}*\n   → {times_str}\n\n"
-
-        msg += f"🔗 Entra inmediatamente:\n{WIDGET_URL}"
-
-        print("🎉 ¡Citas encontradas! Enviando alerta...")
+        for s in all_slots[:8]:
+            times_str = ", ".join(s["times"][:5])
+            msg += f"📅 *{s['date']}* → {times_str}\n"
+        msg += f"\n🔗 {WIDGET_URL}"
+        print("🎉 ¡Citas encontradas!")
         send_telegram(msg)
     else:
         now = datetime.now().strftime("%H:%M:%S")
@@ -143,23 +151,21 @@ def check_appointments():
 
 def main():
     print("=" * 55)
-    print("Monitor Visado Familiar Comunitario - Consulado La Habana")
+    print("Monitor Visado Familiar Comunitario - La Habana")
     print(f"Región: EU West | Intervalo: {CHECK_INTERVAL}s")
     print("=" * 55)
 
-    # Notificación de arranque
     send_telegram(
-        "🤖 *Monitor iniciado*\n\n"
+        "🤖 *Monitor reiniciado*\n\n"
         "Visado Familiar Comunitario - La Habana\n"
-        f"Revisando cada {CHECK_INTERVAL} segundos desde EU West."
+        f"Revisando cada {CHECK_INTERVAL} segundos."
     )
 
     while True:
         try:
             check_appointments()
         except Exception as e:
-            print(f"Error inesperado en el ciclo: {e}")
-
+            print(f"Error en el ciclo: {e}")
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
