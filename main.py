@@ -5,7 +5,6 @@ from bs4 import BeautifulSoup
 
 # Variables de entorno
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-# Obtenemos la cadena de IDs y la dividimos por comas en una lista de cadenas
 RAW_CHAT_IDS = os.getenv("TELEGRAM_CHAT_ID", "")
 TELEGRAM_CHAT_IDS = [chat_id.strip() for chat_id in RAW_CHAT_IDS.split(",") if chat_id.strip()]
 
@@ -33,16 +32,29 @@ def send_telegram_notification(message):
             print(f"Error enviando mensaje a Telegram ID {chat_id}: {e}")
 
 def check_appointments():
+    # Encabezados completos para imitar un navegador Chrome real
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Cache-Control": "max-age=0",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1"
     }
     
     try:
-        response = requests.get(URL_CONSULADO, headers=headers, timeout=15)
+        session = requests.Session()
+        response = session.get(URL_CONSULADO, headers=headers, timeout=15)
         
-        # Omitir el ciclo si el servidor del consulado está saturado/caído
+        # Omitir si el servidor está saturado
         if response.status_code in [502, 503, 504]:
-            print(f"Servidor saturado (HTTP {response.status_code}). Reintentando en el próximo ciclo...")
+            print(f"Servidor saturado (HTTP {response.status_code}). Reintentando...")
             return
 
         response.raise_for_status()
@@ -50,7 +62,6 @@ def check_appointments():
         soup = BeautifulSoup(response.text, "html.parser")
         page_text = soup.get_text().lower()
         
-        # Verificamos si las frases habituales de indisponibilidad NO están en el texto
         if "no hay citas disponibles" not in page_text and "no existen huecos" not in page_text:
             msg = (
                 "🚨 **¡POSIBLE CITA DISPONIBLE!** 🚨\n\n"
