@@ -37,7 +37,6 @@ def check_appointments():
         print("Error: La variable SCRAPER_API_KEY no está configurada en Railway.")
         return
 
-    # Parámetros para enviar la petición desde una IP de España usando ScraperAPI
     payload = {
         'api_key': SCRAPER_API_KEY,
         'url': URL_CONSULADO,
@@ -45,12 +44,11 @@ def check_appointments():
     }
 
     try:
-        # Petición a la API de ScraperAPI
-        response = requests.get('http://api.scraperapi.com', params=payload, timeout=30)
+        # Usamos https y aumentamos el timeout a 60 segundos
+        response = requests.get('https://api.scraperapi.com', params=payload, timeout=60)
         
-        # Omitir el ciclo si el servidor del consulado está saturado/caído
         if response.status_code in [502, 503, 504]:
-            print(f"Servidor del consulado saturado (HTTP {response.status_code}). Reintentando en el próximo ciclo...")
+            print(f"Servidor del consulado saturado (HTTP {response.status_code}). Reintentando...")
             return
 
         response.raise_for_status()
@@ -58,7 +56,6 @@ def check_appointments():
         soup = BeautifulSoup(response.text, "html.parser")
         page_text = soup.get_text().lower()
         
-        # Verificación de disponibilidad de citas
         if "no hay citas disponibles" not in page_text and "no existen huecos" not in page_text:
             msg = (
                 "🚨 **¡POSIBLE CITA DISPONIBLE!** 🚨\n\n"
@@ -83,4 +80,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-            
+    
