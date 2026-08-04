@@ -37,18 +37,21 @@ def check_appointments():
         print("Error: La variable SCRAPER_API_KEY no está configurada en Railway.")
         return
 
+    # Forzar el renderizado JS desde proxy residencial en España
     payload = {
         'api_key': SCRAPER_API_KEY,
         'url': URL_CONSULADO,
-        'country_code': 'es'
+        'country_code': 'es',
+        'render': 'true'
     }
 
     try:
-        # Usamos https y aumentamos el timeout a 60 segundos
-        response = requests.get('https://api.scraperapi.com', params=payload, timeout=60)
+        # Timeout de 90s para darle margen al navegador en la nube de ScraperAPI
+        response = requests.get('https://api.scraperapi.com', params=payload, timeout=90)
         
-        if response.status_code in [502, 503, 504]:
-            print(f"Servidor del consulado saturado (HTTP {response.status_code}). Reintentando...")
+        # Ignorar fallos temporales de servidor o timeouts de ScraperAPI
+        if response.status_code in [500, 502, 503, 504]:
+            print(f"Servidor ocupado o reintento de proxy (HTTP {response.status_code}). Reintentando en el próximo ciclo...")
             return
 
         response.raise_for_status()
@@ -56,6 +59,7 @@ def check_appointments():
         soup = BeautifulSoup(response.text, "html.parser")
         page_text = soup.get_text().lower()
         
+        # Evaluación de los textos de indisponibilidad
         if "no hay citas disponibles" not in page_text and "no existen huecos" not in page_text:
             msg = (
                 "🚨 **¡POSIBLE CITA DISPONIBLE!** 🚨\n\n"
@@ -68,11 +72,11 @@ def check_appointments():
             print("Sin citas disponibles por el momento.")
 
     except requests.exceptions.RequestException as e:
-        print(f"Error al consultar la página a través de ScraperAPI: {e}")
+        print(f"Reintento de conexión en el próximo ciclo: {e}")
 
 def main():
-    print("Iniciando monitor de citas con ScraperAPI (Proxy España)...")
-    send_telegram_notification("🤖 **Monitor de citas activado en Railway.** Peticiones ruteadas desde España 🇪🇸.")
+    print("Iniciando monitor de citas con ScraperAPI (Proxy España + JS Render)...")
+    send_telegram_notification("🤖 **Monitor de citas activado en Railway.** Conexiones ruteadas desde España 🇪🇸.")
     
     while True:
         check_appointments()
@@ -80,4 +84,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+        
