@@ -1,8 +1,8 @@
 import os
 import time
+import random
 from datetime import datetime
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync  # <-- NUEVA IMPORTACIÓN
 import requests
 
 # ====================== CONFIGURACIÓN ======================
@@ -38,33 +38,68 @@ def send_telegram(message: str):
         except Exception as e:
             print(f"❌ Error Telegram ({chat_id}): {e}")
 
+def human_like_behavior(page):
+    """Simula movimientos de ratón y scroll para parecer humano"""
+    try:
+        # Scroll aleatorio
+        page.evaluate("window.scrollBy(0, {})".format(random.randint(100, 300)))
+        time.sleep(random.uniform(0.5, 1.5))
+        # Mover el ratón a una posición aleatoria
+        page.mouse.move(random.randint(100, 500), random.randint(100, 500))
+        time.sleep(random.uniform(0.2, 0.8))
+    except Exception:
+        pass
+
 def check_with_browser():
     with sync_playwright() as p:
+        # Perfil persistente: guarda cookies y sesión (clave para evitar captcha)
+        user_data_dir = "./browser-profile"
         context = p.chromium.launch_persistent_context(
-            user_data_dir="./browser-profile",  # Guarda cookies y sesión
-            headless=True,
+            user_data_dir=user_data_dir,
+            headless=True,  # Cambia a False para depuración local
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--disable-web-security",
+                "--disable-features=BlockInsecurePrivateNetworkRequests",
+                "--disable-features=OutOfBlinkCors",
             ],
             viewport={"width": 1280, "height": 720},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            locale="es-ES"
+            locale="es-ES",
+            ignore_https_errors=True,
+            java_script_enabled=True,
         )
+
         page = context.new_page()
 
-        # Aplicar stealth (oculta webdriver y otras señales)
-        stealth_sync(page)
+        # Inyección para ocultar webdriver (más robusta)
+        page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['es-ES', 'es'] });
+            window.chrome = { runtime: {} };
+            Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 4 });
+        """)
 
         try:
             now_str = datetime.now().strftime("%H:%M:%S")
             print(f"[{now_str}] Iniciando consulta...")
 
             page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(10000)  # Ajusta según lo que tarde en cargar
 
+            # Simular comportamiento humano
+            human_like_behavior(page)
+
+            # Esperar a que el widget se cargue (puede ser un div específico)
+            # Si conoces un selector, mejor: page.wait_for_selector(".widget-container", timeout=15000)
+            page.wait_for_timeout(12000)
+
+            # Extraer contenido de la página y todos los iframes
             full_content = page.content().lower()
             for frame in page.frames:
                 try:
@@ -72,10 +107,12 @@ def check_with_browser():
                 except Exception:
                     pass
 
+            # Debug: extracto del contenido
             preview = full_content.replace("\n", " ").strip()
             preview = preview[:500] if len(preview) > 500 else preview
             print(f"[{now_str}] Preview contenido: {preview}")
 
+            # Frases que indican que NO hay citas
             no_hay_citas = any(x in full_content for x in [
                 "no hay horas disponibles",
                 "no hay citas disponibles",
@@ -83,13 +120,16 @@ def check_with_browser():
                 "no hay citas",
                 "inténtelo de nuevo dentro de unos días",
                 "intentelo de nuevo dentro de unos dias",
-                "no hay disponibilidad"
+                "no hay disponibilidad",
+                "no hay fecha disponible"
             ])
 
             if no_hay_citas:
                 print(f"[{now_str}] → No hay citas disponibles.")
             else:
                 print(f"[{now_str}] ⚠️ No se detectó el mensaje de 'sin citas'")
+
+                # Si no hay mensaje de "sin citas", buscamos indicios de disponibilidad
                 if any(x in full_content for x in [
                     "seleccione fecha",
                     "selecciona una fecha",
@@ -97,7 +137,8 @@ def check_with_browser():
                     "elige fecha",
                     "elige día",
                     "disponibilidad",
-                    "citas disponibles"
+                    "citas disponibles",
+                    "seleccionar fecha"
                 ]):
                     msg = (
                         "🚨 *¡POSIBLE CITA DISPONIBLE!* 🚨\n\n"
@@ -110,15 +151,17 @@ def check_with_browser():
                 else:
                     print(f"[{now_str}] → Estado no claro todavía.")
 
+            # Guardamos la sesión (contexto ya se guarda automáticamente con user_data_dir)
+
         except Exception as e:
-            print(f"❌ Error: {e}")
+            print(f"❌ Error en check: {e}")
         finally:
             context.close()
 
 def main():
     print("=" * 55)
     print("Monitor Visado Familiar Comunitario - La Habana")
-    print("Modo: Playwright + Stealth")
+    print("Modo: Playwright + perfil persistente + evasión manual")
     print(f"Intervalo: {CHECK_INTERVAL}s")
     print("=" * 55)
 
