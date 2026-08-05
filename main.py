@@ -55,7 +55,6 @@ def check_with_browser():
             viewport={"width": 1280, "height": 720},
         )
 
-        # Anti-detection básica
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
         page = context.new_page()
 
@@ -64,17 +63,13 @@ def check_with_browser():
             print(f"[{now_str}] Iniciando consulta en la web del consulado...")
 
             # 1. Cargar la página base
-            page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=45000)
+            page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=60000)
 
-            # 2. Esperar activamente hasta que el DOM monte el contenido de Bookitit
-            # Se usa un selector general del cuerpo de la página y se aguarda la renderización dinámica
-            page.wait_for_selector("body", timeout=15000)
+            # 2. Esperar contenedor principal
+            page.wait_for_selector("body", timeout=20000)
 
-            # 3. Esperar a que ocurra una de las dos condiciones reales:
-            # Opción A: Aparece el texto explícito de no disponibilidad.
-            # Opción B: Aparece un elemento de selección de fechas/horas de Bookitit.
+            # 3. Esperar a que Bookitit responda (Tiempo extendido a 35 seg para servidores lentos)
             try:
-                # Espera dinámica a que el widget escriba la respuesta en pantalla (máx 20 seg)
                 page.wait_for_function(
                     """() => {
                         const text = document.body.innerText.toLowerCase();
@@ -83,13 +78,13 @@ def check_with_browser():
                                text.includes('seleccione') || 
                                document.querySelector('.bkt_day, .bkt_slot, input[type="submit"]') !== null;
                     }""",
-                    timeout=20000
+                    timeout=35000
                 )
             except PlaywrightTimeoutError:
                 print(f"[{now_str}] ⚠️ La página tardó demasiado en responder este ciclo. Se reintentará en el próximo.")
                 return
 
-            # 4. Analizar el contenido definitivo ya renderizado
+            # 4. Analizar el contenido
             content_text = page.content().lower()
 
             no_hay_citas = "no hay horas disponibles" in content_text or "no hay citas" in content_text
@@ -97,7 +92,6 @@ def check_with_browser():
             if no_hay_citas:
                 print(f"[{now_str}] → Confirmado: No hay citas disponibles actualmente.")
             else:
-                # Si llegó aquí y NO está el mensaje de "no hay horas", confirmamos la presencia de citas reales
                 print(f"[{now_str}] 🎉 ¡CITAS DETECTADAS EN PANTALLA!")
                 
                 msg = "🚨 *¡CITAS DISPONIBLES!* 🚨\n\n"
@@ -120,7 +114,7 @@ def main():
     print("=" * 60)
 
     send_telegram(
-        "🤖 *Monitor activado y estabilizado*\n"
+        "🤖 *Monitor activado y optimizado*\n"
         "Visado Familiar Comunitario - La Habana\n"
         f"Revisando agenda cada {CHECK_INTERVAL} segundos."
     )
