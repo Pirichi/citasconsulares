@@ -22,7 +22,7 @@ def enviar_telegram(mensaje):
 
 def revisar_citas():
     print("--------------------------------------------------", flush=True)
-    print("Iniciando revisión de la agenda consular...", flush=True)
+    print("Iniciando revisión con espera de elementos...", flush=True)
     
     browser = None
     try:
@@ -37,27 +37,25 @@ def revisar_citas():
         page.on("dialog", lambda dialog: dialog.accept())
         
         page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=35000)
-        page.wait_for_timeout(4000)
+        
+        # Esperar obligatoriamente a que aparezca el contenedor del texto para asegurar que cargó
+        try:
+            page.wait_for_selector("text=No hay horas disponibles", timeout=10000)
+            print("Texto de cierre detectado correctamente en la página.", flush=True)
+            sigues_cerrado = True
+        except Exception:
+            sigues_cerrado = False
 
         body_text = page.inner_text("body").lower()
+        print(f"Muestra de texto leída: {body_text[:120]}...", flush=True)
         
-        # El texto exacto que aparece cuando está cerrado según tu captura
-        frase_cierre = "no hay horas disponibles"
-        
-        # Validamos si la página cargó correctamente y contiene elementos
-        if len(body_text) < 50:
-            print("Página vacía o error de carga momentáneo. Ignorando.", flush=True)
-            return
-
-        # CONDICIÓN DE ORO: ¿Sigue estando el aviso de que no hay horas?
-        if frase_cierre in body_text:
-            print("Estado normal: La agenda sigue cerrada ('No hay horas disponibles').", flush=True)
+        if sigues_cerrado or "no hay horas disponibles" in body_text:
+            print("Estado normal: La agenda sigue cerrada.", flush=True)
         else:
-            # ¡OJO! ¡El texto de cierre desapareció! La página cambió de estado.
-            print("🚨 ¡EL AVISO DE CIERRE DESAPARECIÓ! ¡POSIBLE APERTURA!", flush=True)
+            print("🚨 ¡EL CARTEL DE CIERRE DESAPARECIÓ DE VERDAD!", flush=True)
             enviar_telegram(
                 "🚨 *¡ATENCIÓN PEDRY! ¡LA AGENDA CAMBIÓ!* 🚨\n"
-                "¡El aviso de 'No hay horas disponibles' ya no está en la pantalla!\n"
+                "¡El aviso oficial ya no está en el DOM!\n"
                 f"[Enlace directo a la agenda]({WIDGET_URL})"
             )
 
@@ -72,14 +70,8 @@ def revisar_citas():
                 pass
 
 def main():
-    print("=== MONITOR DE CITAS (MODO ANTI-SPAM) ===", flush=True)
+    print("=== MONITOR DE CITAS (ESPERA EXPLÍCITA) ===", flush=True)
     print(f"Intervalo configurado: {CHECK_INTERVAL} segundos.", flush=True)
-    
-    enviar_telegram(
-        "🤖 *Monitor Antispam Activo*\n"
-        "Visado Familiar Comunitario - La Habana\n"
-        "Silencioso hasta que la agenda abra de verdad."
-    )
     
     while True:
         revisar_citas()
