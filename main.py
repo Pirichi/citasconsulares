@@ -31,35 +31,53 @@ def revisar_citas():
     
     browser = None
     try:
-        # Lanzamiento usando la configuración oficial de CloakBrowser Pro (Plan Gratuito)
-        # La licencia se toma automáticamente de la variable de entorno CLOAKBROWSER_LICENSE_KEY en Railway
         browser = launch(
             headless=True,
             humanize=True,
             human_preset="careful",
-            geoip=True
+            geoip=False
         )
         
         page = browser.new_page()
-        print(f"Navegando hacia: {WIDGET_URL}", flush=True)
         
-        # Entrar al enlace construido de la agenda
+        # 1. Configurar el escucha automático para aceptar cualquier alerta JavaScript (como "Welcome / Bienvenido")
+        page.on("dialog", lambda dialog: dialog.accept())
+        
+        print(f"Navegando hacia: {WIDGET_URL}", flush=True)
+        # Entrar al enlace de la agenda
         page.goto(WIDGET_URL, timeout=60000)
         
-        # Esperar a que cargue el contenido interno de Bookitit y Cloudflare
-        print("Esperando a que el widget cargue por completo...", flush=True)
-        page.wait_for_timeout(7000)
-        
-        # Extraer el texto visible de la página para analizarlo
+        # Esperar a que pase el diálogo y cargue la pantalla intermedia
+        print("Esperando la pantalla intermedia...", flush=True)
+        page.wait_for_timeout(6000)
+
+        # 2. Buscar y hacer clic en el botón verde "Continue / Continuar"
+        body_text_inicial = page.inner_text("body").lower()
+        if "continue" in body_text_inicial or "continuar" in body_text_inicial:
+            print("Pantalla intermedia detectada. Haciendo clic en Continuar...", flush=True)
+            try:
+                page.click("text=Continuar", timeout=5000)
+            except Exception:
+                try:
+                    page.click("text=Continue", timeout=3000)
+                except Exception:
+                    print("No se pudo hacer clic mediante texto directo, buscando por selector...", flush=True)
+            
+            # Esperar a que cargue la vista final del widget
+            page.wait_for_timeout(5000)
+
+        # Extraer el texto final de la interfaz de citas
         body_text = page.inner_text("body").lower()
         
-        # Palabras clave comunes cuando NO hay citas disponibles
+        # Frases exactas que indican que la agenda está cerrada / sin turnos
         textos_sin_citas = [
+            "no hay horas disponibles",
             "no hay citas",
             "no disponemos de citas",
             "en este momento no hay",
             "próximamente se abrirán",
-            "completo"
+            "completo",
+            "inténtelo de nuevo dentro de unos días"
         ]
         
         # Comprobar si Cloudflare interrumpió la carga
@@ -69,18 +87,18 @@ def revisar_citas():
             print("⚠️ Alerta: Cloudflare detuvo la ejecución.", flush=True)
             enviar_telegram("⚠️ *Cloudflare* ha interceptado la consulta en este ciclo.")
         else:
-            # Validar si aparece algún indicador de falta de cupos
+            # Validar si aparece alguno de los textos de que NO hay cupos
             sin_cupos = any(frase in body_text for frase in textos_sin_citas)
             
             if not sin_cupos:
                 print("¡POSIBLE CAMBIO O CITAS DETECTADAS!", flush=True)
                 enviar_telegram(
                     "🚨 *¡ATENCIÓN PEDRY!* 🚨\n"
-                    "El widget respondió diferente o hay movimiento de citas.\n"
+                    "¡La página avanzó y ya no dice que no hay horas disponibles!\n"
                     f"[Enlace directo a la agenda]({WIDGET_URL})"
                 )
             else:
-                print("Sin citas disponibles por el momento. Todo normal.", flush=True)
+                print("Sin citas disponibles por el momento (Mensaje oficial detectado en la interfaz final). Todo normal.", flush=True)
                 
     except Exception as e:
         error_msg = f"Error crítico durante la ejecución del navegador: {e}"
@@ -88,7 +106,6 @@ def revisar_citas():
         enviar_telegram(f"❌ *Error en el Bot de Citas*:\n`{str(e)}`")
         
     finally:
-        # Cierre limpio obligatorio para liberar la sesión única gratuita de CloakBrowser
         if browser:
             try:
                 browser.close()
@@ -100,7 +117,6 @@ def main():
     print("=== MONITOR DE CITAS CONSULARES CON CLOAKBROWSER ===", flush=True)
     print(f"Intervalo configurado: {CHECK_INTERVAL} segundos.", flush=True)
     
-    # Notificar a Telegram que el bot arrancó correctamente
     enviar_telegram(
         "🤖 *Monitor con CloakBrowser Activo*\n"
         "Visado Familiar Comunitario - La Habana\n"
@@ -114,4 +130,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+        
