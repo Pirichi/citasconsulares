@@ -3,7 +3,7 @@ FROM python:3.10-slim
 # Silenciar el aviso de fuentes de CloakBrowser de forma nativa
 ENV CLOAKBROWSER_SUPPRESS_FONT_WARNING=1
 
-# Instalar dependencias esenciales del sistema para Chromium
+# Instalar dependencias esenciales y librerías gráficas (incluyendo libcairo2) para Chromium
 RUN apt-get update && apt-get install -y \
     wget \
     curl \
@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y \
     libgbm1 \
     libasound2 \
     libpango-1.0-0 \
+    libcairo2 \
     libc6 \
     libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
