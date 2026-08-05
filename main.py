@@ -1,23 +1,33 @@
+```python name=main.py
 #!/usr/bin/env python3
 """
-main.py - Bookitit widget monitor using CloakBrowser, detailed runtime logging,
-Cloudflare/transient-state stabilization, and Telegram notifications.
+main.py - Bookitit widget monitor using CloakBrowser.
 
-This variant changes navigation to wait_until="domcontentloaded" (instead of networkidle)
-to avoid hanging on pages where networkidle never resolves. Navigation is wrapped with
-robust try/except so the monitoring loop never blocks indefinitely.
+This variant launches CloakBrowser per-check and closes it at the end of each cycle
+to avoid accumulating Chromium state and to keep memory usage bounded on constrained hosts.
+
+Behavior:
+- Each loop iteration launches CloakBrowser, creates a page, navigates (wait_until="domcontentloaded"),
+  extracts frame texts (with per-frame timeouts and fallbacks), detects Cloudflare, stabilizes,
+  checks the closure phrase "No hay horas disponibles", and optionally sends a Telegram message
+  when that phrase disappears.
+- The browser is closed in every cycle (finally block) and references are cleared + gc.collect()
+  is called to help free memory before sleeping for CHECK_INTERVAL seconds.
+- Detailed logs are emitted for each step so you can see precisely where cycles spend time.
 
 Environment variables:
 - WIDGET_URL (required)
 - TELEGRAM_BOT_TOKEN (required)
 - TELEGRAM_CHAT_ID (required)
-- CHECK_INTERVAL (optional, seconds, default=60)
-- BROWSER_EXECUTABLE_PATH (optional)
+- CHECK_INTERVAL (optional, seconds; default 60)
+- BROWSER_EXECUTABLE_PATH (optional): path to CloakBrowser/Chrome binary (set as env for cloakbrowser)
 - HEADLESS (optional, "1" or "0"; default "1")
-- NAV_TIMEOUT (optional, navigation timeout in ms; default 60000)
-- CLOUDFLARE_STABILIZE_SECONDS (optional, default 8)
-- CLOUDFLARE_RETRIES (optional, default 2)
+- NAV_TIMEOUT (optional, ms; default 60000)
+- CLOUDFLARE_STABILIZE_SECONDS (optional; default 8)
+- CLOUDFLARE_RETRIES (optional; default 2)
 """
+
+import gc
 import os
 import sys
 import time
@@ -29,7 +39,7 @@ from typing import List, Tuple
 from cloakbrowser import launch
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 
-# Configuration / constants
+# Config / defaults
 CLOSURE_PHRASE = "No hay horas disponibles"
 DEFAULT_CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
 DEFAULT_NAV_TIMEOUT_MS = int(os.environ.get("NAV_TIMEOUT", "60000"))
@@ -69,79 +79,76 @@ def is_cloudflare_text(text: str) -> bool:
 
 def extract_frame_texts(page, per_frame_timeout_ms: int = 3000) -> List[Tuple[str, str]]:
     """
-    Collect text content from all frames (including main frame).
-    This function logs each step and applies short timeouts for frame operations.
-    Falls back to a safe evaluate that reads document.body.innerText (inherits Playwright timeout).
+    Extract text from all frames. Uses short per-frame timeouts and a safe evaluate fallback.
+    Logs progress to make it easy to see which frame (if any) causes trouble.
     """
     results = []
-    seen_frames = set()
     try:
         frames = page.frames
     except Exception as e:
         log(f"extract_frame_texts: failed to read page.frames: {e}")
         return results
 
-    log(f"extract_frame_texts: discovered {len(frames)} frames")
-
+    log(f"extract_frame_texts: found {len(frames)} frames")
+    seen = set()
     for idx, frame in enumerate(frames):
         try:
-            frame_url = frame.url or "<no-url>"
-            frame_name = frame.name or ""
-            frame_id = (frame_url, frame_name)
-            if frame_id in seen_frames:
-                log(f"extract_frame_texts: skipping duplicate frame {frame_url!r} name={frame_name!r}")
+            url = frame.url or "<no-url>"
+            name = frame.name or ""
+            key = (url, name)
+            if key in seen:
+                log(f"extract_frame_texts: skipping duplicate frame {url!r} name={name!r}")
                 continue
-            seen_frames.add(frame_id)
+            seen.add(key)
 
-            log(f"extract_frame_texts: processing frame #{idx} url={frame_url!r} name={frame_name!r}")
-
+            log(f"extract_frame_texts: frame #{idx} url={url!r} name={name!r}")
             text = ""
 
-            # Try using body locator.inner_text with a controlled timeout
+            # Try body.inner_text with a short timeout
             try:
-                log(f"extract_frame_texts: attempting body.inner_text (timeout={per_frame_timeout_ms}ms)")
+                log(f"extract_frame_texts: attempting body.inner_text timeout={per_frame_timeout_ms}ms")
                 body = frame.locator("body")
                 if body:
                     text = body.inner_text(timeout=per_frame_timeout_ms)
-                    log(f"extract_frame_texts: body.inner_text succeeded (len={len(text)})")
+                    log(f"extract_frame_texts: body.inner_text ok len={len(text)}")
                 else:
-                    log("extract_frame_texts: no body locator found")
+                    log("extract_frame_texts: no body locator")
                     text = ""
             except PlaywrightTimeoutError:
                 log("extract_frame_texts: body.inner_text timed out")
                 text = ""
             except PlaywrightError as e:
-                log(f"extract_frame_texts: Playwright error during body.inner_text: {e}")
+                log(f"extract_frame_texts: PlaywrightError during inner_text: {e}")
                 text = ""
             except Exception as e:
-                log(f"extract_frame_texts: unexpected error during body.inner_text: {e}")
+                log(f"extract_frame_texts: error during inner_text: {e}")
                 text = ""
 
-            # Fallback: use a safe evaluate to return document.body.innerText
+            # Fallback: evaluate document.body.innerText (inherits page default timeout)
             if not text:
                 try:
-                    log(f"extract_frame_texts: attempting evaluate fallback (timeout inherits page default)...")
+                    log("extract_frame_texts: attempting evaluate fallback")
                     text = frame.evaluate("() => document.body ? document.body.innerText : ''")
                     if text:
-                        log(f"extract_frame_texts: evaluate fallback succeeded (len={len(text)})")
+                        log(f"extract_frame_texts: evaluate ok len={len(text)}")
                     else:
-                        log("extract_frame_texts: evaluate fallback returned empty text")
+                        log("extract_frame_texts: evaluate returned empty")
                 except PlaywrightTimeoutError:
-                    log("extract_frame_texts: evaluate fallback timed out")
+                    log("extract_frame_texts: evaluate timed out")
                     text = ""
                 except PlaywrightError as e:
-                    log(f"extract_frame_texts: Playwright error during evaluate fallback: {e}")
+                    log(f"extract_frame_texts: PlaywrightError during evaluate: {e}")
                     text = ""
                 except Exception as e:
-                    log(f"extract_frame_texts: unexpected error during evaluate fallback: {e}")
+                    log(f"extract_frame_texts: unexpected evaluate error: {e}")
                     text = ""
 
-            results.append((frame_url, (text or "").strip()))
+            results.append((url, (text or "").strip()))
         except Exception as e:
-            log(f"extract_frame_texts: unexpected outer exception for a frame: {e}\n{traceback.format_exc()}")
+            log(f"extract_frame_texts: unexpected frame loop error: {e}\n{traceback.format_exc()}")
             continue
 
-    log(f"extract_frame_texts: completed, collected {len(results)} frame texts")
+    log(f"extract_frame_texts: completed collected {len(results)} entries")
     return results
 
 
@@ -151,17 +158,17 @@ def choose_relevant_texts(frame_texts: List[Tuple[str, str]]) -> List[Tuple[str,
         if not text:
             continue
         if is_cloudflare_text(text):
-            log(f"choose_relevant_texts: filtering out Cloudflare-like text from {url}")
+            log(f"choose_relevant_texts: filtered cloudflare-like content from {url}")
             continue
         filtered.append((url, text))
 
     if not filtered:
         return []
 
-    bookitit_frames = [t for t in filtered if "bookitit" in (t[0] or "").lower()]
-    if bookitit_frames:
-        log(f"choose_relevant_texts: preferred bookitit frames count={len(bookitit_frames)}")
-        return bookitit_frames
+    bookitit = [t for t in filtered if "bookitit" in (t[0] or "").lower()]
+    if bookitit:
+        log(f"choose_relevant_texts: preferring {len(bookitit)} bookitit frames")
+        return bookitit
 
     log(f"choose_relevant_texts: returning {len(filtered)} filtered frames")
     return filtered
@@ -173,36 +180,180 @@ def send_telegram(bot_token: str, chat_id: str, message: str) -> bool:
     try:
         r = requests.post(api_url, json=payload, timeout=15)
         if r.status_code == 200:
-            log("send_telegram: Telegram notification sent successfully.")
+            log("send_telegram: ok")
             return True
         else:
-            log(f"send_telegram: Telegram API responded with status {r.status_code}: {r.text}")
+            log(f"send_telegram: failed status={r.status_code} body={r.text}")
             return False
     except Exception as e:
-        log(f"send_telegram: Failed to send Telegram message: {e}")
+        log(f"send_telegram: exception {e}")
         return False
 
 
 def safe_navigate(page, url: str, timeout_ms: int) -> bool:
     """
-    Navigate and wait for DOMContentLoaded. Return True if navigation completed (or returned quickly),
-    False on timeout or exception. Includes logging and defensive catches so it cannot hang the loop.
+    Use wait_until='domcontentloaded' to avoid waiting forever for networkidle.
+    Returns True/False and never raises.
     """
     try:
-        log(f"safe_navigate: navigating to {url!r} with timeout {timeout_ms}ms using wait_until='domcontentloaded'")
-        # Use domcontentloaded so we don't wait indefinitely for networkidle
+        log(f"safe_navigate: goto {url!r} timeout={timeout_ms}ms wait_until=domcontentloaded")
         page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-        log("safe_navigate: goto returned without exception (domcontentloaded reached or quick return)")
+        log("safe_navigate: goto returned (domcontentloaded reached or quick return)")
         return True
     except PlaywrightTimeoutError:
-        log(f"safe_navigate: Navigation timed out after {timeout_ms}ms for URL: {url} (domcontentloaded not reached)")
+        log(f"safe_navigate: timeout after {timeout_ms}ms for {url}")
         return False
     except PlaywrightError as e:
-        log(f"safe_navigate: Playwright navigation error for URL {url}: {e}")
+        log(f"safe_navigate: PlaywrightError during goto: {e}")
         return False
     except Exception as e:
-        log(f"safe_navigate: Unexpected exception during navigation for URL {url}: {e}\n{traceback.format_exc()}")
+        log(f"safe_navigate: unexpected exception during goto: {e}\n{traceback.format_exc()}")
         return False
+
+
+def perform_check_cycle(
+    widget_url: str,
+    bot_token: str,
+    chat_id: str,
+    check_interval: int,
+    nav_timeout: int,
+    cf_stabilize_seconds: int,
+    cf_retries: int,
+    headless: bool,
+    exec_path: str,
+):
+    """
+    Launch browser, perform one full check, and then close browser.
+    Returns True if cycle ran (even if it found nothing), False if browser launch failed.
+    """
+    browser = None
+    try:
+        # Provide exec path via env if present (cloakbrowser may read it)
+        if exec_path:
+            os.environ.setdefault("BROWSER_EXECUTABLE_PATH", exec_path)
+            log(f"perform_check_cycle: set BROWSER_EXECUTABLE_PATH={exec_path}")
+
+        log("perform_check_cycle: launching CloakBrowser...")
+        browser = launch(headless=headless, humanize=True, human_preset="careful", geoip=False)
+        log("perform_check_cycle: CloakBrowser launched")
+
+        page = None
+        try:
+            log("perform_check_cycle: creating new page...")
+            page = browser.new_page()
+            log("perform_check_cycle: page created")
+        except Exception as e:
+            log(f"perform_check_cycle: new_page failed: {e}\n{traceback.format_exc()}")
+            return True  # browser exists and will be closed in finally; treat as cycle done
+
+        # Set page timeouts
+        try:
+            page.set_default_navigation_timeout(nav_timeout)
+            page.set_default_timeout(10000)
+            log(f"perform_check_cycle: set page timeouts nav={nav_timeout}ms default=10000ms")
+        except Exception as e:
+            log(f"perform_check_cycle: warning setting timeouts: {e}")
+
+        # Navigate
+        nav_ok = safe_navigate(page, widget_url, nav_timeout)
+
+        # Allow a short attachment window for frames
+        log("perform_check_cycle: sleeping 2s after navigation for frames to attach")
+        time.sleep(2)
+
+        # Extract frames
+        frame_texts = []
+        try:
+            log("perform_check_cycle: extracting frame texts")
+            frame_texts = extract_frame_texts(page)
+            log(f"perform_check_cycle: extracted {len(frame_texts)} frames")
+        except Exception as e:
+            log(f"perform_check_cycle: extract_frame_texts exception: {e}\n{traceback.format_exc()}")
+            frame_texts = []
+
+        combined_all = "\n\n".join((t for _, t in frame_texts)) if frame_texts else ""
+        detected_cf = is_cloudflare_text(combined_all) or (not nav_ok and not combined_all)
+        log(f"perform_check_cycle: detected_cf={detected_cf} nav_ok={nav_ok} frames={len(frame_texts)}")
+
+        # Stabilization if Cloudflare-like or nav failure with empty content
+        if detected_cf:
+            log("perform_check_cycle: Cloudflare detected; running stabilization retries")
+            stabilized = False
+            for attempt in range(1, cf_retries + 1):
+                log(f"perform_check_cycle: stabilization attempt {attempt}/{cf_retries} sleeping {cf_stabilize_seconds}s")
+                time.sleep(cf_stabilize_seconds)
+                try:
+                    frame_texts = extract_frame_texts(page)
+                    log(f"perform_check_cycle: re-extraction returned {len(frame_texts)} frames")
+                except Exception as e:
+                    log(f"perform_check_cycle: re-extraction error: {e}")
+                    frame_texts = []
+                combined_all = "\n\n".join((t for _, t in frame_texts)) if frame_texts else ""
+                if frame_texts and not is_cloudflare_text(combined_all):
+                    log("perform_check_cycle: stabilization successful")
+                    stabilized = True
+                    break
+                else:
+                    log("perform_check_cycle: stabilization attempt shows Cloudflare/empty")
+            if not stabilized:
+                log("perform_check_cycle: stabilization failed; skipping this cycle to avoid false positives")
+                try:
+                    if page:
+                        page.close()
+                except Exception:
+                    pass
+                return True  # cycle completed (no notification), browser will be closed in finally
+
+        # Filter relevant frames
+        relevant = choose_relevant_texts(frame_texts)
+        log(f"perform_check_cycle: relevant frames count={len(relevant)}")
+
+        if not relevant:
+            log("perform_check_cycle: no relevant frames -> end cycle")
+            try:
+                if page:
+                    page.close()
+            except Exception:
+                pass
+            return True
+
+        # Phrase detection
+        combined_text = "\n\n".join(t for _, t in relevant)
+        closed_present = CLOSURE_PHRASE.lower() in combined_text.lower()
+        log(f"perform_check_cycle: closure phrase present? {closed_present}")
+
+        # previous_closed_state is managed by caller; send notification via provided bot if needed.
+        # For this per-cycle function we only return the detection result via return value convention.
+        # We'll return tuple (True, closed_present, relevant) but to keep signature simple return details below.
+        # Close page
+        try:
+            if page:
+                page.close()
+        except Exception:
+            pass
+
+        return (True, closed_present, relevant)
+    except Exception as e:
+        log(f"perform_check_cycle: unexpected error: {e}\n{traceback.format_exc()}")
+        # Ensure we don't raise to caller; treat as completed cycle
+        return True
+    finally:
+        # Close browser and try to free memory
+        try:
+            if browser:
+                log("perform_check_cycle: closing browser to free memory")
+                try:
+                    browser.close()
+                except Exception as e:
+                    log(f"perform_check_cycle: browser.close() exception: {e}")
+                # delete reference and collect
+                del browser
+                gc.collect()
+                # small delay to allow subprocesses to exit and kernel to reclaim
+                time.sleep(1)
+                log("perform_check_cycle: browser closed and garbage collected")
+        except Exception as e:
+            log(f"perform_check_cycle: error during browser cleanup: {e}")
 
 
 def main():
@@ -217,206 +368,93 @@ def main():
     cf_retries = int(os.environ.get("CLOUDFLARE_RETRIES", DEFAULT_CF_RETRIES))
 
     if not widget_url:
-        log("ERROR: WIDGET_URL environment variable is required.")
+        log("ERROR: WIDGET_URL env required")
         sys.exit(2)
     if not bot_token or not chat_id:
-        log("ERROR: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required to send notifications.")
+        log("ERROR: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID required")
         sys.exit(2)
 
-    log("Starting Bookitit widget monitor with CloakBrowser (domcontentloaded navigation).")
-    log(f"WIDGET_URL: {widget_url}")
-    log(f"CHECK_INTERVAL: {check_interval}s, HEADLESS: {headless}, NAV_TIMEOUT: {nav_timeout}ms")
-    log(f"CLOUDFLARE_STABILIZE_SECONDS: {cf_stabilize_seconds}, CLOUDFLARE_RETRIES: {cf_retries}")
-
+    log("Main monitor starting (per-cycle browser launch).")
+    log(f"WIDGET_URL={widget_url} CHECK_INTERVAL={check_interval}s NAV_TIMEOUT={nav_timeout}ms HEADLESS={headless}")
     previous_closed_state = None
-    browser = None
 
-    try:
-        if exec_path:
-            os.environ.setdefault("BROWSER_EXECUTABLE_PATH", exec_path)
-            log(f"Using custom BROWSER_EXECUTABLE_PATH: {exec_path}")
+    while True:
+        cycle_start = time.time()
+        log(f"heartbeat: cycle_start={now_ts()} previous_closed_state={previous_closed_state}")
 
-        log("Launching CloakBrowser...")
-        browser = launch(headless=headless, humanize=True, human_preset="careful", geoip=False)
-        log("CloakBrowser launched successfully.")
-    except Exception as e:
-        log(f"Fatal error launching CloakBrowser: {e}\n{traceback.format_exc()}")
-        sys.exit(1)
-
-    try:
-        log("Entering monitoring loop.")
-        while True:
-            cycle_start = time.time()
-            # HEARTBEAT
-            log(f"heartbeat: cycle_start={now_ts()} previous_closed_state={previous_closed_state}")
-
-            page = None
-            try:
-                # Page creation
-                try:
-                    log("loop: creating new page...")
-                    page = browser.new_page()
-                    log("loop: page created successfully")
-                except Exception as e:
-                    log(f"loop: failed to create new page: {e}\n{traceback.format_exc()}")
-                    log(f"loop: sleeping full CHECK_INTERVAL ({check_interval}s) before retry")
-                    time.sleep(check_interval)
-                    continue
-
-                # Configure per-page timeouts to avoid hangs
-                try:
-                    log(f"loop: setting page timeouts nav={nav_timeout}ms default=10000ms")
-                    page.set_default_navigation_timeout(nav_timeout)
-                    page.set_default_timeout(10000)  # action timeout for locators/evaluate
-                except Exception as e:
-                    log(f"loop: warning setting page timeouts: {e}")
-
-                # Navigate using safe_navigate which now uses domcontentloaded
-                nav_ok = False
-                try:
-                    log("loop: about to navigate to widget_url")
-                    nav_ok = safe_navigate(page, widget_url, nav_timeout)
-                    log(f"loop: navigation result nav_ok={nav_ok}")
-                except Exception as e:
-                    log(f"loop: exception during navigation: {e}\n{traceback.format_exc()}")
-                    nav_ok = False
-
-                # Short post-navigation sleep to let frames attach
-                try:
-                    log("loop: short post-navigation sleep 2s to allow frames to attach")
-                    time.sleep(2)
-                except Exception:
-                    pass
-
-                # Extract frames with logged detail
-                try:
-                    log("loop: starting frame extraction")
-                    frame_texts = extract_frame_texts(page)
-                    log(f"loop: frame extraction returned {len(frame_texts)} entries")
-                except Exception as e:
-                    log(f"loop: exception during extract_frame_texts: {e}\n{traceback.format_exc()}")
-                    frame_texts = []
-
-                # Quick combined inspection for Cloudflare
-                combined_all = "\n\n".join((t for _, t in frame_texts)) if frame_texts else ""
-                detected_cf = is_cloudflare_text(combined_all) or (not nav_ok and not combined_all)
-                log(f"loop: detected_cf={detected_cf} (nav_ok={nav_ok}, frames={len(frame_texts)})")
-
-                if detected_cf:
-                    log("loop: Cloudflare or navigation problem detected; attempting stabilization retries")
-                    stabilized = False
-                    for attempt in range(1, cf_retries + 1):
-                        log(f"loop: stabilization attempt {attempt}/{cf_retries} - sleeping {cf_stabilize_seconds}s")
-                        time.sleep(cf_stabilize_seconds)
-                        try:
-                            log(f"loop: re-running extract_frame_texts (attempt {attempt})")
-                            frame_texts = extract_frame_texts(page)
-                            log(f"loop: re-extraction returned {len(frame_texts)} frames")
-                        except Exception as e:
-                            log(f"loop: extraction attempt {attempt} failed: {e}")
-                            frame_texts = []
-                        combined_all = "\n\n".join((t for _, t in frame_texts)) if frame_texts else ""
-                        if frame_texts and not is_cloudflare_text(combined_all):
-                            log("loop: stabilization successful")
-                            stabilized = True
-                            break
-                        else:
-                            log(f"loop: attempt {attempt} still shows Cloudflare/empty")
-                    if not stabilized:
-                        log("loop: stabilization failed — closing page and sleeping full CHECK_INTERVAL")
-                        try:
-                            page.close()
-                        except Exception:
-                            pass
-                        time.sleep(check_interval)
-                        continue
-
-                # Choose relevant frames for phrase detection
-                log("loop: choosing relevant frames (filtering cloudflare/empty)")
-                relevant = choose_relevant_texts(frame_texts)
-                log(f"loop: relevant frames count={len(relevant)}")
-
-                if not relevant:
-                    log("loop: no relevant content found; closing page and sleeping full CHECK_INTERVAL")
-                    try:
-                        page.close()
-                    except Exception:
-                        pass
-                    time.sleep(check_interval)
-                    continue
-
-                # Phrase detection
-                combined_text = "\n\n".join(t for _, t in relevant)
-                closed_present = CLOSURE_PHRASE.lower() in combined_text.lower()
-                log(f"loop: closure phrase present? {closed_present}")
-
-                if previous_closed_state is None:
-                    previous_closed_state = closed_present
-                    log(f"loop: initial previous_closed_state={previous_closed_state}")
-
-                # Notification trigger
-                if previous_closed_state and not closed_present:
-                    log("loop: closure phrase DISAPPEARED -> preparing Telegram notification")
-                    message = (
-                        f"Agenda changed: '{CLOSURE_PHRASE}' is no longer present on the widget at {widget_url}\n"
-                        f"Time: {now_ts()}\n"
-                        f"Detected frames (snippets):\n"
-                    )
-                    for url, text in relevant:
-                        snippet = (text[:300].replace("\n", " ")) if text else ""
-                        message += f"- {url} -> {snippet}\n"
-
-                    try:
-                        log("loop: sending Telegram message...")
-                        sent_ok = send_telegram(bot_token, chat_id, message)
-                        log(f"loop: send_telegram returned {sent_ok}")
-                    except Exception as e:
-                        log(f"loop: exception while sending Telegram: {e}\n{traceback.format_exc()}")
-                        sent_ok = False
-
-                    if sent_ok:
-                        previous_closed_state = closed_present
-                        log("loop: notification sent; updated previous_closed_state")
-                    else:
-                        log("loop: notification failed; leaving previous_closed_state to avoid repeated notifications")
-
-                else:
-                    previous_closed_state = closed_present
-                    log(f"loop: no notification. previous_closed_state={previous_closed_state}")
-
-                # Close page explicitly
-                try:
-                    log("loop: closing page")
-                    page.close()
-                except Exception as e:
-                    log(f"loop: page.close() error: {e}")
-
-            except KeyboardInterrupt:
-                log("KeyboardInterrupt received; exiting loop.")
-                break
-            except Exception as e:
-                log(f"loop: unexpected exception: {e}\n{traceback.format_exc()}")
-                try:
-                    if page:
-                        page.close()
-                except Exception:
-                    pass
-            finally:
-                # Always sleep full check_interval before next cycle
-                log(f"loop: cycle complete — sleeping full CHECK_INTERVAL {check_interval}s")
-                time.sleep(check_interval)
-
-    finally:
+        # perform one cycle with a fresh browser
         try:
-            if browser:
-                log("closing browser before exit")
-                browser.close()
-                log("browser closed")
-        except Exception as e:
-            log(f"error closing browser: {e}")
+            result = perform_check_cycle(
+                widget_url=widget_url,
+                bot_token=bot_token,
+                chat_id=chat_id,
+                check_interval=check_interval,
+                nav_timeout=nav_timeout,
+                cf_stabilize_seconds=cf_stabilize_seconds,
+                cf_retries=cf_retries,
+                headless=headless,
+                exec_path=exec_path,
+            )
 
-    log("monitor exited")
+            # perform_check_cycle returns either True (simple signal) or (True, closed_present, relevant)
+            closed_present = None
+            relevant = []
+            if isinstance(result, tuple) and len(result) == 3:
+                _, closed_present, relevant = result
+            else:
+                # result could be True (cycle ran but no meaningful data), treat as no-op
+                log("main: cycle completed without frame result (no change to previous state)")
+                # Sleep and continue
+                log(f"main: sleeping full CHECK_INTERVAL {check_interval}s")
+                time.sleep(check_interval)
+                continue
+
+            log(f"main: cycle detection closed_present={closed_present} relevant_count={len(relevant)}")
+
+            # Initialize previous state if unknown
+            if previous_closed_state is None:
+                previous_closed_state = closed_present
+                log(f"main: initial previous_closed_state set to {previous_closed_state}")
+
+            # Trigger notification only when previous was True (closed) and now False (opened)
+            if previous_closed_state and (closed_present is False):
+                log("main: detected disappearance of closure phrase -> sending notification")
+                message = (
+                    f"Agenda changed: '{CLOSURE_PHRASE}' is no longer present on the widget at {widget_url}\n"
+                    f"Time: {now_ts()}\n"
+                    f"Detected frames (snippets):\n"
+                )
+                for url, text in relevant:
+                    snippet = (text[:300].replace("\n", " ")) if text else ""
+                    message += f"- {url} -> {snippet}\n"
+
+                try:
+                    ok = send_telegram(bot_token, chat_id, message)
+                    if ok:
+                        previous_closed_state = closed_present
+                        log("main: notification sent; updated previous_closed_state")
+                    else:
+                        log("main: notification failed; keeping previous_closed_state to avoid repeat notifications")
+                except Exception as e:
+                    log(f"main: exception while sending telegram: {e}\n{traceback.format_exc()}")
+
+            else:
+                previous_closed_state = closed_present
+                log(f"main: no notification. previous_closed_state updated to {previous_closed_state}")
+
+        except KeyboardInterrupt:
+            log("main: KeyboardInterrupt received; exiting")
+            break
+        except Exception as e:
+            log(f"main: unexpected error during cycle: {e}\n{traceback.format_exc()}")
+
+        # Always sleep the full configured check interval between cycles
+        log(f"main: cycle finished. Sleeping full CHECK_INTERVAL: {check_interval}s")
+        time.sleep(check_interval)
+
+    log("main: monitor exiting")
 
 
 if __name__ == "__main__":
     main()
+```
