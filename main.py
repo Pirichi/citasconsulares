@@ -1,7 +1,6 @@
 import time
 import os
 import requests
-from cloakbrowser import launch
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -16,73 +15,31 @@ def enviar_telegram(mensaje):
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
         try:
-            response = requests.post(url, json=payload, timeout=10)
-            if not response.ok:
-                print(f"Error al enviar Telegram: {response.text}", flush=True)
+            requests.post(url, json=payload, timeout=10)
         except Exception as e:
-            print(f"Excepción al conectar con Telegram: {e}", flush=True)
+            print(f"Error al enviar Telegram: {e}", flush=True)
 
 def revisar_citas():
     print("--------------------------------------------------", flush=True)
-    print("Iniciando ciclo de revisión con CloakBrowser...", flush=True)
+    print("Consultando widget consular mediante petición HTTP...", flush=True)
     
-    browser = None
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "es-ES,es;q=0.9",
+        "Referer": "https://www.citaconsular.es/"
+    }
+    
     try:
-        browser = launch(
-            headless=True,
-            humanize=True,
-            human_preset="careful",
-            geoip=False
-        )
+        response = requests.get(WIDGET_URL, headers=headers, timeout=15)
+        print(f"Código de estado HTTP: {response.status_code}", flush=True)
         
-        page = browser.new_page()
-        
-        # 1. Capturar automáticamente cualquier alerta o cuadro de bienvenida de JS
-        page.on("dialog", lambda dialog: dialog.accept())
-        
-        print(f"Navegando hacia el widget consular...", flush=True)
-        page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=30000)
-        
-        print("Esperando la carga inicial y posibles diálogos...", flush=True)
-        page.wait_for_timeout(4000)
+        if response.status_code != 200:
+            print(f"Servidor respondió con código inesperado: {response.status_code}", flush=True)
+            return
 
-        # 2. Barrera del botón "Continue / Continuar" o "Para solicitar cita pulse en el botón continuar"
-        body_text_inicial = page.inner_text("body").lower()
-        if "continue" in body_text_inicial or "continuar" in body_text_inicial or "pulse en el botón" in body_text_inicial:
-            print("Pantalla intermedia detectada. Buscando botón 'Continuar / Continue'...", flush=True)
-            clicked = False
-            
-            # Intentar hacer clic por diferentes selectores o textos comunes en este widget
-            intentos_botones = [
-                "text=Continuar",
-                "text=Continue",
-                "button:has-text('Continuar')",
-                "button:has-text('Continue')",
-                "input[value*='Continuar']",
-                "input[value*='Continue']",
-                "a:has-text('Continuar')",
-                "a:has-text('Continue')"
-            ]
-            
-            for selector in intentos_botones:
-                try:
-                    if page.locator(selector).count() > 0:
-                        page.click(selector, timeout=3000)
-                        print(f"¡Clic exitoso usando el selector: {selector}!", flush=True)
-                        clicked = True
-                        break
-                except Exception:
-                    continue
-            
-            if not clicked:
-                print("No se pudo hacer clic mediante selectores automáticos, intentando clic por coordenadas o avanzando...", flush=True)
-            
-            # Dar un respiro tras el clic para que cargue la siguiente vista del widget
-            page.wait_for_timeout(5000)
-
-        # 3. Extraer el texto final de la interfaz de citas
-        body_text = page.inner_text("body").lower()
+        body_text = response.text.lower()
         
+        # Frases que determinan que la agenda está cerrada
         textos_sin_citas = [
             "no hay horas disponibles",
             "no hay citas",
@@ -94,49 +51,37 @@ def revisar_citas():
         ]
         
         if "cf-browser-verification" in body_text or "challenge-running" in body_text:
-            print("⚠️ Cloudflare interceptó la conexión en este ciclo.", flush=True)
-            enviar_telegram("⚠️ *Cloudflare* ha interceptado la consulta en este ciclo.")
+            print("⚠️ Cloudflare detectó la petición.", flush=True)
+            enviar_telegram("⚠️ *Cloudflare* ha interceptado la consulta HTTP.")
         else:
-            if len(body_text) < 100:
-                print("Carga incompleta o página en blanco detectada. Ignorando este ciclo.", flush=True)
-            else:
-                sin_cupos = any(frase in body_text for frase in textos_sin_citas)
+            sin_cupos = any(frase in body_text for frase in textos_sin_citas)
+            
+            if not sin_cupos:
+                # Verificación extra para asegurar que hay elementos de calendario o fechas reales
+                elementos_validos = ["calendario", "horario", "mes", "dia", "cita", "servicio", "continuar", "continue"]
+                hay_indicios = any(palabra in body_text for palabra in elementos_validos)
                 
-                if not sin_cupos:
-                    # Filtro estricto para evitar falsos positivos por páginas vacías o transiciones
-                    elementos_calendario = ["seleccione", "calendario", "horario", "mes", "dia", "cita", "servicio"]
-                    hay_calendario_activo = any(palabra in body_text for palabra in elementos_calendario)
-                    
-                    if hay_calendario_activo:
-                        print("🚨 ¡CITAS REALES DETECTADAS EN LA INTERFAZ!", flush=True)
-                        enviar_telegram(
-                            "🚨 *¡ATENCIÓN PEDRY! HAY CITAS* 🚨\n"
-                            "¡La agenda avanzó y muestra elementos de selección activos!\n"
-                            f"[Enlace directo a la agenda]({WIDGET_URL})"
-                        )
-                    else:
-                        print("Transición detectada pero sin confirmación clara de calendario. Monitoreando...", flush=True)
+                if hay_indicios:
+                    print("🚨 ¡CAMBIO DETECTADO EN LA AGENDA!", flush=True)
+                    enviar_telegram(
+                        "🚨 *¡ATENCIÓN PEDRY! HAY CITAS* 🚨\n"
+                        "¡La agenda muestra cambios o elementos activos!\n"
+                        f"[Enlace directo a la agenda]({WIDGET_URL})"
+                    )
                 else:
-                    print("Sin citas disponibles por el momento (Mensaje oficial detectado). Todo normal.", flush=True)
-                
+                    print("Página sin frases de cierre pero sin indicios claros. Monitoreando...", flush=True)
+            else:
+                print("Sin citas disponibles por el momento. Todo normal.", flush=True)
+
     except Exception as e:
-        error_msg = f"Error controlado en ciclo de revisión: {e}"
-        print(error_msg, flush=True)
-        
-    finally:
-        if browser:
-            try:
-                browser.close()
-                print("Navegador cerrado con éxito. Sesión liberada.", flush=True)
-            except Exception as close_error:
-                print(f"Error al cerrar navegador: {close_error}", flush=True)
+        print(f"Error en la petición: {e}", flush=True)
 
 def main():
-    print("=== MONITOR DE CITAS CONSULARES CON CLOAKBROWSER ===", flush=True)
+    print("=== MONITOR DE CITAS CONSULARES (HTTP RÁPIDO) ===", flush=True)
     print(f"Intervalo configurado: {CHECK_INTERVAL} segundos.", flush=True)
     
     enviar_telegram(
-        "🤖 *Monitor con CloakBrowser Activo*\n"
+        "🤖 *Monitor Rápido Activo*\n"
         "Visado Familiar Comunitario - La Habana\n"
         f"Revisando agenda cada {CHECK_INTERVAL} segundos."
     )
