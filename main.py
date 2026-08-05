@@ -40,18 +40,19 @@ def revisar_citas():
         
         page = browser.new_page()
         
-        # 1. Configurar el escucha automático para aceptar cualquier alerta JavaScript (como "Welcome / Bienvenido")
+        print(f"Navegando hacia: {WIDGET_URL}", flush=True)
+        
+        # Configurar un manejador robusto para aceptar cualquier diálogo de inmediato
         page.on("dialog", lambda dialog: dialog.accept())
         
-        print(f"Navegando hacia: {WIDGET_URL}", flush=True)
-        # Entrar al enlace de la agenda
-        page.goto(WIDGET_URL, timeout=60000)
+        # Entrar al enlace de la agenda permitiendo que cargue el DOM sin forzar el bloqueo de red completo
+        page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=60000)
         
-        # Esperar a que pase el diálogo y cargue la pantalla intermedia
-        print("Esperando la pantalla intermedia...", flush=True)
-        page.wait_for_timeout(6000)
+        # Dar un respiro para que el navegador resuelva los scripts internos del widget
+        print("Esperando la carga de elementos y diálogos...", flush=True)
+        page.wait_for_timeout(5000)
 
-        # 2. Buscar y hacer clic en el botón verde "Continue / Continuar"
+        # Buscar y hacer clic en el botón verde "Continue / Continuar" si está presente en la pantalla intermedia
         body_text_inicial = page.inner_text("body").lower()
         if "continue" in body_text_inicial or "continuar" in body_text_inicial:
             print("Pantalla intermedia detectada. Haciendo clic en Continuar...", flush=True)
@@ -63,7 +64,7 @@ def revisar_citas():
                 except Exception:
                     print("No se pudo hacer clic mediante texto directo, buscando por selector...", flush=True)
             
-            # Esperar a que cargue la vista final del widget
+            # Esperar a que cargue la vista final del widget tras el clic
             page.wait_for_timeout(5000)
 
         # Extraer el texto final de la interfaz de citas
@@ -130,4 +131,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
+    
