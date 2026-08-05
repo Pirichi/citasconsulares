@@ -22,7 +22,7 @@ def enviar_telegram(mensaje):
 
 def revisar_citas():
     print("--------------------------------------------------", flush=True)
-    print("Iniciando revisión con espera de elementos...", flush=True)
+    print("Iniciando revisión buscando dentro del iframe...", flush=True)
     
     browser = None
     try:
@@ -38,29 +38,44 @@ def revisar_citas():
         
         page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=35000)
         
-        # Esperar obligatoriamente a que aparezca el contenedor del texto para asegurar que cargó
-        try:
-            page.wait_for_selector("text=No hay horas disponibles", timeout=10000)
-            print("Texto de cierre detectado correctamente en la página.", flush=True)
-            sigues_cerrado = True
-        except Exception:
-            sigues_cerrado = False
-
-        body_text = page.inner_text("body").lower()
-        print(f"Muestra de texto leída: {body_text[:120]}...", flush=True)
+        # Esperamos a que carguen los marcos de la página
+        page.wait_for_timeout(6000)
         
-        if sigues_cerrado or "no hay horas disponibles" in body_text:
-            print("Estado normal: La agenda sigue cerrada.", flush=True)
+        # Buscamos el texto dentro de los iframes si los hay, o en la página principal
+        texto_encontrado = ""
+        
+        # Intentamos extraer texto de los iframes de la página
+        frames = page.frames
+        print(f"Total de marcos (iframes) detectados: {len(frames)}", flush=True)
+        
+        for frame in frames:
+            try:
+                f_text = frame.inner_text("body").lower()
+                if "no hay horas disponibles" in f_text or "calendario" in f_text or "horario" in f_text:
+                    texto_encontrado = f_text
+                    break
+            except Exception:
+                continue
+                
+        # Si no se encontró en los iframes, usamos la página principal
+        if not texto_encontrado:
+            texto_encontrado = page.inner_text("body").lower()
+
+        print(f"Texto analizado con éxito (primeros 100 caracteres): {texto_encontrado[:100]}...", flush=True)
+        
+        # CONDICIÓN ESTRICTA
+        if "no hay horas disponibles" in texto_encontrado:
+            print("Estado normal: El cartel de cierre sigue presente.", flush=True)
         else:
-            print("🚨 ¡EL CARTEL DE CIERRE DESAPARECIÓ DE VERDAD!", flush=True)
+            print("🚨 ¡EL CARTEL DE CIERRE DESAPARECIÓ DENTRO DEL WIDGET!", flush=True)
             enviar_telegram(
                 "🚨 *¡ATENCIÓN PEDRY! ¡LA AGENDA CAMBIÓ!* 🚨\n"
-                "¡El aviso oficial ya no está en el DOM!\n"
+                "¡El widget ya no muestra el aviso de cierre!\n"
                 f"[Enlace directo a la agenda]({WIDGET_URL})"
             )
 
     except Exception as e:
-        print(f"Error durante el ciclo: {e}", flush=True)
+        print(f"Error durante el ciclo con iframe: {e}", flush=True)
         
     finally:
         if browser:
@@ -70,7 +85,7 @@ def revisar_citas():
                 pass
 
 def main():
-    print("=== MONITOR DE CITAS (ESPERA EXPLÍCITA) ===", flush=True)
+    print("=== MONITOR DE CITAS (SOPORTE IFRAME) ===", flush=True)
     print(f"Intervalo configurado: {CHECK_INTERVAL} segundos.", flush=True)
     
     while True:
