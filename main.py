@@ -3,18 +3,15 @@ import os
 import requests
 from cloakbrowser import launch
 
-# Cargar las variables de entorno configuradas en Railway
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
 
-# Estructura modular del enlace de la agenda consular
 PUBLIC_KEY = "2f9880d8d5b8feb958c81d2a08157bcf1"
 SERVICE_ID = "bkt871926"
 WIDGET_URL = f"https://www.citaconsular.es/es/hosteds/widgetdefault/{PUBLIC_KEY}/{SERVICE_ID}"
 
 def enviar_telegram(mensaje):
-    """Envía alertas directamente a tu chat de Telegram"""
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
@@ -31,6 +28,7 @@ def revisar_citas():
     
     browser = None
     try:
+        print("Lanzando navegador sigiloso...", flush=True)
         browser = launch(
             headless=True,
             humanize=True,
@@ -38,39 +36,23 @@ def revisar_citas():
             geoip=False
         )
         
+        print("Abriendo nueva pestaña...", flush=True)
         page = browser.new_page()
         
-        print(f"Navegando hacia: {WIDGET_URL}", flush=True)
-        
-        # Configurar un manejador robusto para aceptar cualquier diálogo de inmediato
+        # Manejador automático de alertas de JavaScript
         page.on("dialog", lambda dialog: dialog.accept())
         
-        # Entrar al enlace de la agenda permitiendo que cargue el DOM sin forzar el bloqueo de red completo
-        page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=60000)
+        print(f"Navegando hacia la URL de la agenda...", flush=True)
+        # Forzamos un timeout estricto de 30 segundos para que no se quede congelado nunca
+        page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=30000)
         
-        # Dar un respiro para que el navegador resuelva los scripts internos del widget
-        print("Esperando la carga de elementos y diálogos...", flush=True)
-        page.wait_for_timeout(5000)
+        print("Página alcanzada. Esperando renderizado de elementos...", flush=True)
+        page.wait_for_timeout(4000)
 
-        # Buscar y hacer clic en el botón verde "Continue / Continuar" si está presente en la pantalla intermedia
-        body_text_inicial = page.inner_text("body").lower()
-        if "continue" in body_text_inicial or "continuar" in body_text_inicial:
-            print("Pantalla intermedia detectada. Haciendo clic en Continuar...", flush=True)
-            try:
-                page.click("text=Continuar", timeout=5000)
-            except Exception:
-                try:
-                    page.click("text=Continue", timeout=3000)
-                except Exception:
-                    print("No se pudo hacer clic mediante texto directo, buscando por selector...", flush=True)
-            
-            # Esperar a que cargue la vista final del widget tras el clic
-            page.wait_for_timeout(5000)
-
-        # Extraer el texto final de la interfaz de citas
+        # Verificar contenido actual del DOM
         body_text = page.inner_text("body").lower()
+        print(f"Texto extraído correctamente (Longitud: {len(body_text)} caracteres).", flush=True)
         
-        # Frases exactas que indican que la agenda está cerrada / sin turnos
         textos_sin_citas = [
             "no hay horas disponibles",
             "no hay citas",
@@ -81,38 +63,35 @@ def revisar_citas():
             "inténtelo de nuevo dentro de unos días"
         ]
         
-        # Comprobar si Cloudflare interrumpió la carga
-        hay_bloqueo_cloudflare = "cf-browser-verification" in body_text or "challenge-running" in body_text
-        
-        if hay_bloqueo_cloudflare:
-            print("⚠️ Alerta: Cloudflare detuvo la ejecución.", flush=True)
+        if "cf-browser-verification" in body_text or "challenge-running" in body_text:
+            print("⚠️ Cloudflare interceptó la conexión en este ciclo.", flush=True)
             enviar_telegram("⚠️ *Cloudflare* ha interceptado la consulta en este ciclo.")
         else:
-            # Validar si aparece alguno de los textos de que NO hay cupos
             sin_cupos = any(frase in body_text for frase in textos_sin_citas)
             
             if not sin_cupos:
-                print("¡POSIBLE CAMBIO O CITAS DETECTADAS!", flush=True)
+                print("🚨 ¡POSIBLE CAMBIO O CITAS DETECTADAS!", flush=True)
                 enviar_telegram(
                     "🚨 *¡ATENCIÓN PEDRY!* 🚨\n"
                     "¡La página avanzó y ya no dice que no hay horas disponibles!\n"
                     f"[Enlace directo a la agenda]({WIDGET_URL})"
                 )
             else:
-                print("Sin citas disponibles por el momento (Mensaje oficial detectado en la interfaz final). Todo normal.", flush=True)
+                print("Estado normal: Sin citas disponibles detectadas en la interfaz.", flush=True)
                 
     except Exception as e:
-        error_msg = f"Error crítico durante la ejecución del navegador: {e}"
+        error_msg = f"Error controlado en ciclo de revisión: {e}"
         print(error_msg, flush=True)
-        enviar_telegram(f"❌ *Error en el Bot de Citas*:\n`{str(e)}`")
+        # Opcional: Descomentar la siguiente línea si quieres alerta de cada pequeño error temporal
+        # enviar_telegram(f"⚠️ *Aviso del Bot*:\n`{str(e)}`")
         
     finally:
         if browser:
             try:
                 browser.close()
-                print("Navegador cerrado limpiamente (Sesión liberada).", flush=True)
+                print("Navegador cerrado con éxito. Sesión liberada.", flush=True)
             except Exception as close_error:
-                print(f"Error al cerrar el navegador: {close_error}", flush=True)
+                print(f"Error al cerrar navegador: {close_error}", flush=True)
 
 def main():
     print("=== MONITOR DE CITAS CONSULARES CON CLOAKBROWSER ===", flush=True)
@@ -126,7 +105,7 @@ def main():
     
     while True:
         revisar_citas()
-        print(f"Esperando {CHECK_INTERVAL} segundos para la siguiente revisión...\n", flush=True)
+        print(f"Ciclo finalizado. Durmiendo {CHECK_INTERVAL} segundos...\n", flush=True)
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
