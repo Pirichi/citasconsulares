@@ -1,4 +1,3 @@
-```python name=main.py
 #!/usr/bin/env python3
 """
 main.py - Bookitit widget monitor using CloakBrowser.
