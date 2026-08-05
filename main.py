@@ -1,7 +1,7 @@
 import os
 import time
 from datetime import datetime
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
 import requests
 
 # ====================== CONFIGURACIÓN ======================
@@ -62,36 +62,27 @@ def check_with_browser():
             now_str = datetime.now().strftime('%H:%M:%S')
             print(f"[{now_str}] Iniciando consulta en la web del consulado...")
 
-            # 1. Cargar la página base
-            page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=60000)
+            # 1. Esperar a que la red esté inactiva (que terminen las peticiones de Bookitit)
+            page.goto(WIDGET_URL, wait_until="networkidle", timeout=45000)
 
-            # 2. Esperar contenedor principal
-            page.wait_for_selector("body", timeout=20000)
+            # 2. Pequeña pausa táctica de 3s para renderizado de plantillas JS
+            page.wait_for_timeout(3000)
 
-            # 3. Esperar a que Bookitit responda (Tiempo extendido a 35 seg para servidores lentos)
-            try:
-                page.wait_for_function(
-                    """() => {
-                        const text = document.body.innerText.toLowerCase();
-                        return text.includes('no hay horas disponibles') || 
-                               text.includes('no hay citas') || 
-                               text.includes('seleccione') || 
-                               document.querySelector('.bkt_day, .bkt_slot, input[type="submit"]') !== null;
-                    }""",
-                    timeout=35000
-                )
-            except PlaywrightTimeoutError:
-                print(f"[{now_str}] ⚠️ La página tardó demasiado en responder este ciclo. Se reintentará en el próximo.")
-                return
+            # 3. Extraer el HTML de la página principal Y de todos los iframes
+            full_content = page.content().lower()
+            for frame in page.frames:
+                try:
+                    full_content += " " + frame.content().lower()
+                except Exception:
+                    pass
 
-            # 4. Analizar el contenido
-            content_text = page.content().lower()
-
-            no_hay_citas = "no hay horas disponibles" in content_text or "no hay citas" in content_text
+            # 4. Comprobaciones
+            no_hay_citas = "no hay horas disponibles" in full_content or "no hay citas" in full_content
+            widget_presente = "bookitit" in full_content or "consulado" in full_content
 
             if no_hay_citas:
                 print(f"[{now_str}] → Confirmado: No hay citas disponibles actualmente.")
-            else:
+            elif widget_presente:
                 print(f"[{now_str}] 🎉 ¡CITAS DETECTADAS EN PANTALLA!")
                 
                 msg = "🚨 *¡CITAS DISPONIBLES!* 🚨\n\n"
@@ -100,6 +91,8 @@ def check_with_browser():
                 msg += f"🔗 Entra de inmediato a reservar: {WIDGET_URL}"
                 
                 send_telegram(msg)
+            else:
+                print(f"[{now_str}] ⚠️ Estructura no reconocida en este ciclo. Reintentando...")
 
         except Exception as e:
             print(f"❌ Error durante la ejecución del navegador: {e}")
@@ -109,12 +102,12 @@ def check_with_browser():
 def main():
     print("=" * 60)
     print(" Monitor Visado Familiar Comunitario - La Habana")
-    print(" Modo: Evaluación Dinámica de DOM (Sin falsos positivos)")
+    print(" Modo: Red Inactiva + Análisis de iFrames")
     print(f" Intervalo de chequeo: {CHECK_INTERVAL} segundos")
     print("=" * 60)
 
     send_telegram(
-        "🤖 *Monitor activado y optimizado*\n"
+        "🤖 *Monitor actualizado (Estrategia NetworkIdle)*\n"
         "Visado Familiar Comunitario - La Habana\n"
         f"Revisando agenda cada {CHECK_INTERVAL} segundos."
     )
