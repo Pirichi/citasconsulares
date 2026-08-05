@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-# Instalar dependencias esenciales del sistema para Playwright y Chromium
+# Instalar dependencias del sistema esenciales para Chromium / Playwright / CloakBrowser
 RUN apt-get update && apt-get install -y \
     wget \
     curl \
@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y \
     libpangocairo-1.0-0 \
     libxss1 \
     libxtst6 \
+    libxkbcommon0 \
     fonts-liberation \
     xdg-utils \
     && rm -rf /var/lib/apt/lists/*
