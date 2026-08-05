@@ -28,7 +28,6 @@ def revisar_citas():
     
     browser = None
     try:
-        print("Lanzando navegador sigiloso...", flush=True)
         browser = launch(
             headless=True,
             humanize=True,
@@ -36,22 +35,53 @@ def revisar_citas():
             geoip=False
         )
         
-        print("Abriendo nueva pestaña...", flush=True)
         page = browser.new_page()
         
-        # Manejador automático de alertas de JavaScript
+        # 1. Capturar automáticamente cualquier alerta o cuadro de bienvenida de JS
         page.on("dialog", lambda dialog: dialog.accept())
         
-        print(f"Navegando hacia la URL de la agenda...", flush=True)
-        # Forzamos un timeout estricto de 30 segundos para que no se quede congelado nunca
+        print(f"Navegando hacia el widget consular...", flush=True)
         page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=30000)
         
-        print("Página alcanzada. Esperando renderizado de elementos...", flush=True)
+        print("Esperando la carga inicial y posibles diálogos...", flush=True)
         page.wait_for_timeout(4000)
 
-        # Verificar contenido actual del DOM
+        # 2. Barrera del botón "Continue / Continuar" o "Para solicitar cita pulse en el botón continuar"
+        body_text_inicial = page.inner_text("body").lower()
+        if "continue" in body_text_inicial or "continuar" in body_text_inicial or "pulse en el botón" in body_text_inicial:
+            print("Pantalla intermedia detectada. Buscando botón 'Continuar / Continue'...", flush=True)
+            clicked = False
+            
+            # Intentar hacer clic por diferentes selectores o textos comunes en este widget
+            intentos_botones = [
+                "text=Continuar",
+                "text=Continue",
+                "button:has-text('Continuar')",
+                "button:has-text('Continue')",
+                "input[value*='Continuar']",
+                "input[value*='Continue']",
+                "a:has-text('Continuar')",
+                "a:has-text('Continue')"
+            ]
+            
+            for selector in intentos_botones:
+                try:
+                    if page.locator(selector).count() > 0:
+                        page.click(selector, timeout=3000)
+                        print(f"¡Clic exitoso usando el selector: {selector}!", flush=True)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            
+            if not clicked:
+                print("No se pudo hacer clic mediante selectores automáticos, intentando clic por coordenadas o avanzando...", flush=True)
+            
+            # Dar un respiro tras el clic para que cargue la siguiente vista del widget
+            page.wait_for_timeout(5000)
+
+        # 3. Extraer el texto final de la interfaz de citas
         body_text = page.inner_text("body").lower()
-        print(f"Texto extraído correctamente (Longitud: {len(body_text)} caracteres).", flush=True)
         
         textos_sin_citas = [
             "no hay horas disponibles",
@@ -67,23 +97,31 @@ def revisar_citas():
             print("⚠️ Cloudflare interceptó la conexión en este ciclo.", flush=True)
             enviar_telegram("⚠️ *Cloudflare* ha interceptado la consulta en este ciclo.")
         else:
-            sin_cupos = any(frase in body_text for frase in textos_sin_citas)
-            
-            if not sin_cupos:
-                print("🚨 ¡POSIBLE CAMBIO O CITAS DETECTADAS!", flush=True)
-                enviar_telegram(
-                    "🚨 *¡ATENCIÓN PEDRY!* 🚨\n"
-                    "¡La página avanzó y ya no dice que no hay horas disponibles!\n"
-                    f"[Enlace directo a la agenda]({WIDGET_URL})"
-                )
+            if len(body_text) < 100:
+                print("Carga incompleta o página en blanco detectada. Ignorando este ciclo.", flush=True)
             else:
-                print("Estado normal: Sin citas disponibles detectadas en la interfaz.", flush=True)
+                sin_cupos = any(frase in body_text for frase in textos_sin_citas)
+                
+                if not sin_cupos:
+                    # Filtro estricto para evitar falsos positivos por páginas vacías o transiciones
+                    elementos_calendario = ["seleccione", "calendario", "horario", "mes", "dia", "cita", "servicio"]
+                    hay_calendario_activo = any(palabra in body_text for palabra in elementos_calendario)
+                    
+                    if hay_calendario_activo:
+                        print("🚨 ¡CITAS REALES DETECTADAS EN LA INTERFAZ!", flush=True)
+                        enviar_telegram(
+                            "🚨 *¡ATENCIÓN PEDRY! HAY CITAS* 🚨\n"
+                            "¡La agenda avanzó y muestra elementos de selección activos!\n"
+                            f"[Enlace directo a la agenda]({WIDGET_URL})"
+                        )
+                    else:
+                        print("Transición detectada pero sin confirmación clara de calendario. Monitoreando...", flush=True)
+                else:
+                    print("Sin citas disponibles por el momento (Mensaje oficial detectado). Todo normal.", flush=True)
                 
     except Exception as e:
         error_msg = f"Error controlado en ciclo de revisión: {e}"
         print(error_msg, flush=True)
-        # Opcional: Descomentar la siguiente línea si quieres alerta de cada pequeño error temporal
-        # enviar_telegram(f"⚠️ *Aviso del Bot*:\n`{str(e)}`")
         
     finally:
         if browser:
