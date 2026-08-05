@@ -1,7 +1,7 @@
 import os
 import time
 from datetime import datetime
-from playwright.sync_api import sync_playwright
+from cloakbrowser.sync_api import sync_playwright
 import requests
 
 # ====================== CONFIGURACIÓN ======================
@@ -39,26 +39,27 @@ def send_telegram(message: str):
 
 def check_with_browser():
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
+        # Perfil persistente: guarda cookies y sesión para evitar captcha repetido
+        context = p.chromium.launch_persistent_context(
+            user_data_dir="./browser-profile",
+            headless=True,  # Cambia a False para ver el navegador
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
-            ]
-        )
-
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            locale="es-ES",
+            ],
             viewport={"width": 1280, "height": 720},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            locale="es-ES"
         )
 
-        context.add_init_script(
+        page = context.new_page()
+
+        # Inyección adicional (CloakBrowser ya oculta webdriver, pero por si acaso)
+        page.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
         )
-        page = context.new_page()
 
         try:
             now_str = datetime.now().strftime("%H:%M:%S")
@@ -66,21 +67,20 @@ def check_with_browser():
 
             page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=60000)
 
-            # Esperamos a que el widget termine de cargar
-            page.wait_for_timeout(12000)
+            # Esperamos a que el widget cargue (puedes ajustar este tiempo)
+            page.wait_for_timeout(10000)
 
-            # Extraemos el contenido de la página principal + iframes
+            # Extraemos contenido de la página y todos los iframes
             full_content = page.content().lower()
-
             for frame in page.frames:
                 try:
                     full_content += " " + frame.content().lower()
                 except Exception:
                     pass
 
-            # Debug: mostramos un extracto de lo que está leyendo
+            # Debug: extracto del contenido
             preview = full_content.replace("\n", " ").strip()
-            preview = preview[:400] if len(preview) > 400 else preview
+            preview = preview[:500] if len(preview) > 500 else preview
             print(f"[{now_str}] Preview contenido: {preview}")
 
             # Frases que indican que NO hay citas
@@ -90,7 +90,8 @@ def check_with_browser():
                 "no existen huecos",
                 "no hay citas",
                 "inténtelo de nuevo dentro de unos días",
-                "intentelo de nuevo dentro de unos dias"
+                "intentelo de nuevo dentro de unos dias",
+                "no hay disponibilidad"
             ])
 
             if no_hay_citas:
@@ -98,14 +99,15 @@ def check_with_browser():
             else:
                 print(f"[{now_str}] ⚠️ No se detectó el mensaje de 'sin citas'")
 
-                # Solo alertamos si aparece algo que parezca calendario/disponibilidad
+                # Si no hay mensaje de "sin citas", buscamos indicios de disponibilidad
                 if any(x in full_content for x in [
                     "seleccione fecha",
                     "selecciona una fecha",
                     "horario disponible",
                     "elige fecha",
                     "elige día",
-                    "disponibilidad"
+                    "disponibilidad",
+                    "citas disponibles"
                 ]):
                     msg = (
                         "🚨 *¡POSIBLE CITA DISPONIBLE!* 🚨\n\n"
@@ -121,12 +123,12 @@ def check_with_browser():
         except Exception as e:
             print(f"❌ Error: {e}")
         finally:
-            browser.close()
+            context.close()
 
 def main():
     print("=" * 55)
     print("Monitor Visado Familiar Comunitario - La Habana")
-    print("Modo: domcontentloaded + análisis de contenido")
+    print("Modo: CloakBrowser + perfil persistente")
     print(f"Intervalo: {CHECK_INTERVAL}s")
     print("=" * 55)
 
