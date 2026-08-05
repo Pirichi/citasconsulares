@@ -1,8 +1,7 @@
 import os
 import time
-import random
 from datetime import datetime
-from playwright.sync_api import sync_playwright
+from cloakbrowser import launch
 import requests
 
 # ====================== CONFIGURACIÓN ======================
@@ -20,7 +19,7 @@ WIDGET_URL = f"https://www.citaconsular.es/es/hosteds/widgetdefault/{PUBLIC_KEY}
 
 def send_telegram(message: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
-        print("⚠️ Variables de Telegram no configuradas.")
+        print("⚠️ Variables de Telegram no configuradas correctamente.")
         return
     for chat_id in TELEGRAM_CHAT_IDS:
         try:
@@ -36,139 +35,62 @@ def send_telegram(message: str):
             )
             print(f"✅ Notificación enviada a Telegram ({chat_id})")
         except Exception as e:
-            print(f"❌ Error Telegram ({chat_id}): {e}")
-
-def human_like_behavior(page):
-    """Simula movimientos de ratón y scroll para parecer humano"""
-    try:
-        # Scroll aleatorio
-        page.evaluate("window.scrollBy(0, {})".format(random.randint(100, 300)))
-        time.sleep(random.uniform(0.5, 1.5))
-        # Mover el ratón a una posición aleatoria
-        page.mouse.move(random.randint(100, 500), random.randint(100, 500))
-        time.sleep(random.uniform(0.2, 0.8))
-    except Exception:
-        pass
+            print(f"❌ Error al enviar mensaje a Telegram ({chat_id}): {e}")
 
 def check_with_browser():
-    with sync_playwright() as p:
-        # Perfil persistente: guarda cookies y sesión (clave para evitar captcha)
-        user_data_dir = "./browser-profile"
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=user_data_dir,
-            headless=True,  # Cambia a False para depuración local
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-features=IsolateOrigins,site-per-process",
-                "--disable-web-security",
-                "--disable-features=BlockInsecurePrivateNetworkRequests",
-                "--disable-features=OutOfBlinkCors",
-            ],
-            viewport={"width": 1280, "height": 720},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            locale="es-ES",
-            ignore_https_errors=True,
-            java_script_enabled=True,
-        )
+    # Iniciamos CloakBrowser con su Chromium sigiloso anti-Cloudflare
+    browser = launch(headless=True)
+    page = browser.new_page()
 
-        page = context.new_page()
+    try:
+        now_str = datetime.now().strftime('%H:%M:%S')
+        print(f"[{now_str}] Iniciando consulta con CloakBrowser...")
 
-        # Inyección para ocultar webdriver (más robusta)
-        page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['es-ES', 'es'] });
-            window.chrome = { runtime: {} };
-            Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 4 });
-        """)
+        # Navegación superando los filtros de Cloudflare
+        page.goto(WIDGET_URL, wait_until="networkidle", timeout=45000)
+        page.wait_for_timeout(3000)
 
-        try:
-            now_str = datetime.now().strftime("%H:%M:%S")
-            print(f"[{now_str}] Iniciando consulta...")
+        # Extracción de contenido global incluyendo iframes
+        full_content = page.content().lower()
+        for frame in page.frames:
+            try:
+                full_content += " " + frame.content().lower()
+            except Exception:
+                pass
 
-            page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=60000)
+        no_hay_citas = "no hay horas disponibles" in full_content or "no hay citas" in full_content
+        widget_presente = "bookitit" in full_content or "consulado" in full_content
 
-            # Simular comportamiento humano
-            human_like_behavior(page)
+        if no_hay_citas:
+            print(f"[{now_str}] → Confirmado: No hay citas disponibles actualmente.")
+        elif widget_presente:
+            print(f"[{now_str}] 🎉 ¡CITAS DETECTADAS EN PANTALLA!")
+            
+            msg = "🚨 *¡CITAS DISPONIBLES!* 🚨\n\n"
+            msg += "*Visado Familiar Comunitario - La Habana*\n"
+            msg += "Se ha detectado apertura en la agenda del consulado.\n\n"
+            msg += f"🔗 Entra de inmediato a reservar: {WIDGET_URL}"
+            
+            send_telegram(msg)
+        else:
+            print(f"[{now_str}] ⚠️ Posible bloqueo de Cloudflare o estructura no reconocida. Reintentando...")
 
-            # Esperar a que el widget se cargue (puede ser un div específico)
-            # Si conoces un selector, mejor: page.wait_for_selector(".widget-container", timeout=15000)
-            page.wait_for_timeout(12000)
-
-            # Extraer contenido de la página y todos los iframes
-            full_content = page.content().lower()
-            for frame in page.frames:
-                try:
-                    full_content += " " + frame.content().lower()
-                except Exception:
-                    pass
-
-            # Debug: extracto del contenido
-            preview = full_content.replace("\n", " ").strip()
-            preview = preview[:500] if len(preview) > 500 else preview
-            print(f"[{now_str}] Preview contenido: {preview}")
-
-            # Frases que indican que NO hay citas
-            no_hay_citas = any(x in full_content for x in [
-                "no hay horas disponibles",
-                "no hay citas disponibles",
-                "no existen huecos",
-                "no hay citas",
-                "inténtelo de nuevo dentro de unos días",
-                "intentelo de nuevo dentro de unos dias",
-                "no hay disponibilidad",
-                "no hay fecha disponible"
-            ])
-
-            if no_hay_citas:
-                print(f"[{now_str}] → No hay citas disponibles.")
-            else:
-                print(f"[{now_str}] ⚠️ No se detectó el mensaje de 'sin citas'")
-
-                # Si no hay mensaje de "sin citas", buscamos indicios de disponibilidad
-                if any(x in full_content for x in [
-                    "seleccione fecha",
-                    "selecciona una fecha",
-                    "horario disponible",
-                    "elige fecha",
-                    "elige día",
-                    "disponibilidad",
-                    "citas disponibles",
-                    "seleccionar fecha"
-                ]):
-                    msg = (
-                        "🚨 *¡POSIBLE CITA DISPONIBLE!* 🚨\n\n"
-                        "*Visado Familiar Comunitario - La Habana*\n"
-                        "Se detectó un posible cambio en la agenda.\n\n"
-                        f"🔗 Entra rápido: {WIDGET_URL}"
-                    )
-                    send_telegram(msg)
-                    print(f"[{now_str}] 🎉 Alerta enviada a Telegram")
-                else:
-                    print(f"[{now_str}] → Estado no claro todavía.")
-
-            # Guardamos la sesión (contexto ya se guarda automáticamente con user_data_dir)
-
-        except Exception as e:
-            print(f"❌ Error en check: {e}")
-        finally:
-            context.close()
+    except Exception as e:
+        print(f"❌ Error durante la ejecución del navegador stealth: {e}")
+    finally:
+        browser.close()
 
 def main():
-    print("=" * 55)
-    print("Monitor Visado Familiar Comunitario - La Habana")
-    print("Modo: Playwright + perfil persistente + evasión manual")
-    print(f"Intervalo: {CHECK_INTERVAL}s")
-    print("=" * 55)
+    print("=" * 60)
+    print(" Monitor Visado Familiar Comunitario - La Habana")
+    print(" Modo: CloakBrowser Stealth Anti-Cloudflare")
+    print(f" Intervalo de chequeo: {CHECK_INTERVAL} segundos")
+    print("=" * 60)
 
     send_telegram(
-        "🤖 *Monitor actualizado*\n"
+        "🤖 *Monitor con CloakBrowser Activo*\n"
         "Visado Familiar Comunitario - La Habana\n"
-        f"Revisando cada {CHECK_INTERVAL} segundos."
+        f"Revisando agenda cada {CHECK_INTERVAL} segundos."
     )
 
     while True:
@@ -176,8 +98,10 @@ def main():
             check_with_browser()
         except Exception as e:
             print(f"Error en el bucle principal: {e}")
-        print(f"Esperando {CHECK_INTERVAL} segundos...\n")
+
+        print(f"Esperando {CHECK_INTERVAL} segundos para la siguiente revisión...\n")
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
     main()
+    
