@@ -3,9 +3,9 @@
 main.py - Bookitit widget monitor using CloakBrowser, detailed runtime logging,
 Cloudflare/transient-state stabilization, and Telegram notifications.
 
-This variant adds very fine-grained logs around page creation, navigation,
-frame extraction and stabilization so you can see exactly where the loop
-is blocking in production.
+This variant changes navigation to wait_until="domcontentloaded" (instead of networkidle)
+to avoid hanging on pages where networkidle never resolves. Navigation is wrapped with
+robust try/except so the monitoring loop never blocks indefinitely.
 
 Environment variables:
 - WIDGET_URL (required)
@@ -102,7 +102,6 @@ def extract_frame_texts(page, per_frame_timeout_ms: int = 3000) -> List[Tuple[st
                 log(f"extract_frame_texts: attempting body.inner_text (timeout={per_frame_timeout_ms}ms)")
                 body = frame.locator("body")
                 if body:
-                    # inner_text accepts timeout in ms
                     text = body.inner_text(timeout=per_frame_timeout_ms)
                     log(f"extract_frame_texts: body.inner_text succeeded (len={len(text)})")
                 else:
@@ -122,8 +121,6 @@ def extract_frame_texts(page, per_frame_timeout_ms: int = 3000) -> List[Tuple[st
             if not text:
                 try:
                     log(f"extract_frame_texts: attempting evaluate fallback (timeout inherits page default)...")
-                    # Evaluate the page's body text; this inherits page default timeout
-                    # If no body exists return empty string
                     text = frame.evaluate("() => document.body ? document.body.innerText : ''")
                     if text:
                         log(f"extract_frame_texts: evaluate fallback succeeded (len={len(text)})")
@@ -188,22 +185,23 @@ def send_telegram(bot_token: str, chat_id: str, message: str) -> bool:
 
 def safe_navigate(page, url: str, timeout_ms: int) -> bool:
     """
-    Navigate and wait for networkidle. Return True if navigation completed (or returned quickly),
-    False on timeout or exception. Includes logging.
+    Navigate and wait for DOMContentLoaded. Return True if navigation completed (or returned quickly),
+    False on timeout or exception. Includes logging and defensive catches so it cannot hang the loop.
     """
     try:
-        log(f"safe_navigate: navigating to {url!r} with timeout {timeout_ms}ms")
-        page.goto(url, wait_until="networkidle", timeout=timeout_ms)
-        log("safe_navigate: goto returned without exception")
+        log(f"safe_navigate: navigating to {url!r} with timeout {timeout_ms}ms using wait_until='domcontentloaded'")
+        # Use domcontentloaded so we don't wait indefinitely for networkidle
+        page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        log("safe_navigate: goto returned without exception (domcontentloaded reached or quick return)")
         return True
     except PlaywrightTimeoutError:
-        log(f"safe_navigate: Navigation timeout after {timeout_ms}ms for URL: {url}")
+        log(f"safe_navigate: Navigation timed out after {timeout_ms}ms for URL: {url} (domcontentloaded not reached)")
         return False
     except PlaywrightError as e:
-        log(f"safe_navigate: Playwright error during navigation: {e}")
+        log(f"safe_navigate: Playwright navigation error for URL {url}: {e}")
         return False
     except Exception as e:
-        log(f"safe_navigate: Unexpected exception during navigation: {e}")
+        log(f"safe_navigate: Unexpected exception during navigation for URL {url}: {e}\n{traceback.format_exc()}")
         return False
 
 
@@ -225,7 +223,7 @@ def main():
         log("ERROR: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required to send notifications.")
         sys.exit(2)
 
-    log("Starting Bookitit widget monitor with CloakBrowser (detailed logging).")
+    log("Starting Bookitit widget monitor with CloakBrowser (domcontentloaded navigation).")
     log(f"WIDGET_URL: {widget_url}")
     log(f"CHECK_INTERVAL: {check_interval}s, HEADLESS: {headless}, NAV_TIMEOUT: {nav_timeout}ms")
     log(f"CLOUDFLARE_STABILIZE_SECONDS: {cf_stabilize_seconds}, CLOUDFLARE_RETRIES: {cf_retries}")
@@ -271,10 +269,9 @@ def main():
                     page.set_default_navigation_timeout(nav_timeout)
                     page.set_default_timeout(10000)  # action timeout for locators/evaluate
                 except Exception as e:
-                    # Some cloakbrowser wrappers might not expose these; log and continue
                     log(f"loop: warning setting page timeouts: {e}")
 
-                # Navigate
+                # Navigate using safe_navigate which now uses domcontentloaded
                 nav_ok = False
                 try:
                     log("loop: about to navigate to widget_url")
@@ -284,7 +281,7 @@ def main():
                     log(f"loop: exception during navigation: {e}\n{traceback.format_exc()}")
                     nav_ok = False
 
-                # Small wait to allow frames to attach (but avoid long sleeps)
+                # Short post-navigation sleep to let frames attach
                 try:
                     log("loop: short post-navigation sleep 2s to allow frames to attach")
                     time.sleep(2)
