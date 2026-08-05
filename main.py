@@ -55,62 +55,68 @@ def check_with_browser():
             viewport={"width": 1280, "height": 720},
         )
 
-        context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
+        context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+        )
         page = context.new_page()
 
         try:
-            now_str = datetime.now().strftime('%H:%M:%S')
+            now_str = datetime.now().strftime("%H:%M:%S")
             print(f"[{now_str}] Iniciando consulta...")
 
-            # Usamos domcontentloaded en vez de networkidle (evita el timeout)
             page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=60000)
 
-            # Esperamos a que el widget termine de renderizar
-            page.wait_for_timeout(8000)
+            # Esperamos a que el widget termine de cargar
+            page.wait_for_timeout(12000)
 
-            # Extraemos contenido de la página + iframes
+            # Extraemos el contenido de la página principal + iframes
             full_content = page.content().lower()
 
             for frame in page.frames:
                 try:
                     full_content += " " + frame.content().lower()
-                except:
+                except Exception:
                     pass
 
-            # Comprobaciones
+            # Debug: mostramos un extracto de lo que está leyendo
+            preview = full_content.replace("\n", " ").strip()
+            preview = preview[:400] if len(preview) > 400 else preview
+            print(f"[{now_str}] Preview contenido: {preview}")
+
+            # Frases que indican que NO hay citas
             no_hay_citas = any(x in full_content for x in [
                 "no hay horas disponibles",
                 "no hay citas disponibles",
                 "no existen huecos",
-                "no hay citas"
-            ])
-
-            tiene_calendario = any(x in full_content for x in [
-                "seleccione fecha",
-                "selecciona una fecha",
-                "horario disponible",
-                "elige fecha",
-                "bookitit"
+                "no hay citas",
+                "inténtelo de nuevo dentro de unos días",
+                "intentelo de nuevo dentro de unos dias"
             ])
 
             if no_hay_citas:
                 print(f"[{now_str}] → No hay citas disponibles.")
-            elif tiene_calendario or "continuar" in full_content:
-                # Puede haber citas o estar en pantalla intermedia
-                print(f"[{now_str}] ⚠️ Posible cambio detectado en la página")
-                
-                # Solo alertamos si claramente NO dice que no hay citas
-                if not no_hay_citas:
+            else:
+                print(f"[{now_str}] ⚠️ No se detectó el mensaje de 'sin citas'")
+
+                # Solo alertamos si aparece algo que parezca calendario/disponibilidad
+                if any(x in full_content for x in [
+                    "seleccione fecha",
+                    "selecciona una fecha",
+                    "horario disponible",
+                    "elige fecha",
+                    "elige día",
+                    "disponibilidad"
+                ]):
                     msg = (
                         "🚨 *¡POSIBLE CITA DISPONIBLE!* 🚨\n\n"
                         "*Visado Familiar Comunitario - La Habana*\n"
-                        "Se detectó un cambio en la agenda del consulado.\n\n"
+                        "Se detectó un posible cambio en la agenda.\n\n"
                         f"🔗 Entra rápido: {WIDGET_URL}"
                     )
                     send_telegram(msg)
-                    print(f"[{now_str}] 🎉 Alerta enviada")
-            else:
-                print(f"[{now_str}] → Estado no claro / página cargando...")
+                    print(f"[{now_str}] 🎉 Alerta enviada a Telegram")
+                else:
+                    print(f"[{now_str}] → Estado no claro todavía.")
 
         except Exception as e:
             print(f"❌ Error: {e}")
@@ -134,7 +140,7 @@ def main():
         try:
             check_with_browser()
         except Exception as e:
-            print(f"Error en bucle: {e}")
+            print(f"Error en el bucle principal: {e}")
 
         print(f"Esperando {CHECK_INTERVAL} segundos...\n")
         time.sleep(CHECK_INTERVAL)
