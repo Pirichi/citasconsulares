@@ -19,7 +19,7 @@ WIDGET_URL = f"https://www.citaconsular.es/es/hosteds/widgetdefault/{PUBLIC_KEY}
 
 def send_telegram(message: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
-        print("⚠️ Variables de Telegram no configuradas correctamente.")
+        print("⚠️ Variables de Telegram no configuradas.")
         return
     for chat_id in TELEGRAM_CHAT_IDS:
         try:
@@ -35,7 +35,7 @@ def send_telegram(message: str):
             )
             print(f"✅ Notificación enviada a Telegram ({chat_id})")
         except Exception as e:
-            print(f"❌ Error al enviar mensaje a Telegram ({chat_id}): {e}")
+            print(f"❌ Error Telegram ({chat_id}): {e}")
 
 def check_with_browser():
     with sync_playwright() as p:
@@ -60,67 +60,84 @@ def check_with_browser():
 
         try:
             now_str = datetime.now().strftime('%H:%M:%S')
-            print(f"[{now_str}] Iniciando consulta en la web del consulado...")
+            print(f"[{now_str}] Iniciando consulta...")
 
-            # 1. Esperar a que la red esté inactiva (que terminen las peticiones de Bookitit)
-            page.goto(WIDGET_URL, wait_until="networkidle", timeout=45000)
+            # Usamos domcontentloaded en vez de networkidle (evita el timeout)
+            page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=60000)
 
-            # 2. Pequeña pausa táctica de 3s para renderizado de plantillas JS
-            page.wait_for_timeout(3000)
+            # Esperamos a que el widget termine de renderizar
+            page.wait_for_timeout(8000)
 
-            # 3. Extraer el HTML de la página principal Y de todos los iframes
+            # Extraemos contenido de la página + iframes
             full_content = page.content().lower()
+
             for frame in page.frames:
                 try:
                     full_content += " " + frame.content().lower()
-                except Exception:
+                except:
                     pass
 
-            # 4. Comprobaciones
-            no_hay_citas = "no hay horas disponibles" in full_content or "no hay citas" in full_content
-            widget_presente = "bookitit" in full_content or "consulado" in full_content
+            # Comprobaciones
+            no_hay_citas = any(x in full_content for x in [
+                "no hay horas disponibles",
+                "no hay citas disponibles",
+                "no existen huecos",
+                "no hay citas"
+            ])
+
+            tiene_calendario = any(x in full_content for x in [
+                "seleccione fecha",
+                "selecciona una fecha",
+                "horario disponible",
+                "elige fecha",
+                "bookitit"
+            ])
 
             if no_hay_citas:
-                print(f"[{now_str}] → Confirmado: No hay citas disponibles actualmente.")
-            elif widget_presente:
-                print(f"[{now_str}] 🎉 ¡CITAS DETECTADAS EN PANTALLA!")
+                print(f"[{now_str}] → No hay citas disponibles.")
+            elif tiene_calendario or "continuar" in full_content:
+                # Puede haber citas o estar en pantalla intermedia
+                print(f"[{now_str}] ⚠️ Posible cambio detectado en la página")
                 
-                msg = "🚨 *¡CITAS DISPONIBLES!* 🚨\n\n"
-                msg += "*Visado Familiar Comunitario - La Habana*\n"
-                msg += "Se ha detectado apertura en la agenda del consulado.\n\n"
-                msg += f"🔗 Entra de inmediato a reservar: {WIDGET_URL}"
-                
-                send_telegram(msg)
+                # Solo alertamos si claramente NO dice que no hay citas
+                if not no_hay_citas:
+                    msg = (
+                        "🚨 *¡POSIBLE CITA DISPONIBLE!* 🚨\n\n"
+                        "*Visado Familiar Comunitario - La Habana*\n"
+                        "Se detectó un cambio en la agenda del consulado.\n\n"
+                        f"🔗 Entra rápido: {WIDGET_URL}"
+                    )
+                    send_telegram(msg)
+                    print(f"[{now_str}] 🎉 Alerta enviada")
             else:
-                print(f"[{now_str}] ⚠️ Estructura no reconocida en este ciclo. Reintentando...")
+                print(f"[{now_str}] → Estado no claro / página cargando...")
 
         except Exception as e:
-            print(f"❌ Error durante la ejecución del navegador: {e}")
+            print(f"❌ Error: {e}")
         finally:
             browser.close()
 
 def main():
-    print("=" * 60)
-    print(" Monitor Visado Familiar Comunitario - La Habana")
-    print(" Modo: Red Inactiva + Análisis de iFrames")
-    print(f" Intervalo de chequeo: {CHECK_INTERVAL} segundos")
-    print("=" * 60)
+    print("=" * 55)
+    print("Monitor Visado Familiar Comunitario - La Habana")
+    print("Modo: domcontentloaded + análisis de contenido")
+    print(f"Intervalo: {CHECK_INTERVAL}s")
+    print("=" * 55)
 
     send_telegram(
-        "🤖 *Monitor actualizado (Estrategia NetworkIdle)*\n"
+        "🤖 *Monitor actualizado*\n"
         "Visado Familiar Comunitario - La Habana\n"
-        f"Revisando agenda cada {CHECK_INTERVAL} segundos."
+        f"Revisando cada {CHECK_INTERVAL} segundos."
     )
 
     while True:
         try:
             check_with_browser()
         except Exception as e:
-            print(f"Error en el bucle principal: {e}")
+            print(f"Error en bucle: {e}")
 
-        print(f"Esperando {CHECK_INTERVAL} segundos para la siguiente revisión...\n")
+        print(f"Esperando {CHECK_INTERVAL} segundos...\n")
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
     main()
-    
