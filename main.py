@@ -22,7 +22,7 @@ def enviar_telegram(mensaje):
 
 def revisar_citas():
     print("--------------------------------------------------", flush=True)
-    print("Iniciando revisión buscando dentro del iframe...", flush=True)
+    print("Iniciando ciclo de sondeo...", flush=True)
     
     browser = None
     try:
@@ -37,45 +37,40 @@ def revisar_citas():
         page.on("dialog", lambda dialog: dialog.accept())
         
         page.goto(WIDGET_URL, wait_until="domcontentloaded", timeout=35000)
+        page.wait_for_timeout(8000)
         
-        # Esperamos a que carguen los marcos de la página
-        page.wait_for_timeout(6000)
-        
-        # Buscamos el texto dentro de los iframes si los hay, o en la página principal
-        texto_encontrado = ""
-        
-        # Intentamos extraer texto de los iframes de la página
-        frames = page.frames
-        print(f"Total de marcos (iframes) detectados: {len(frames)}", flush=True)
-        
-        for frame in frames:
-            try:
-                f_text = frame.inner_text("body").lower()
-                if "no hay horas disponibles" in f_text or "calendario" in f_text or "horario" in f_text:
-                    texto_encontrado = f_text
-                    break
-            except Exception:
-                continue
-                
-        # Si no se encontró en los iframes, usamos la página principal
-        if not texto_encontrado:
-            texto_encontrado = page.inner_text("body").lower()
+        # Obtenemos todo el contenido de la página incluyendo marcos si existen
+        contenido_total = ""
+        try:
+            for frame in page.frames:
+                contenido_total += " " + frame.inner_text("body").lower()
+        except Exception:
+            pass
+            
+        # Respaldo con el body principal si los frames fallan
+        contenido_total += " " + page.inner_text("body").lower()
 
-        print(f"Texto analizado con éxito (primeros 100 caracteres): {texto_encontrado[:100]}...", flush=True)
-        
-        # CONDICIÓN ESTRICTA
-        if "no hay horas disponibles" in texto_encontrado:
-            print("Estado normal: El cartel de cierre sigue presente.", flush=True)
+        # 1. Si aparece Cloudflare, lo ignoramos amablemente sin disparar alarmas
+        if "security service" in contenido_total or "performing security verification" in contenido_total or "cf-browser-verification" in contenido_total:
+            print("🛡️ Cloudflare activo en la pasarela. Omitiendo ciclo.", flush=True)
+            return
+
+        # 2. Verificamos la presencia del texto de cierre oficial
+        if "no hay horas disponibles" in contenido_total:
+            print("Estado normal: La agenda sigue cerrada.", flush=True)
         else:
-            print("🚨 ¡EL CARTEL DE CIERRE DESAPARECIÓ DENTRO DEL WIDGET!", flush=True)
-            enviar_telegram(
-                "🚨 *¡ATENCIÓN PEDRY! ¡LA AGENDA CAMBIÓ!* 🚨\n"
-                "¡El widget ya no muestra el aviso de cierre!\n"
-                f"[Enlace directo a la agenda]({WIDGET_URL})"
-            )
+            if len(contenido_total.strip()) > 50:
+                print("🚨 ¡EL CARTEL DE CIERRE DESAPARECIÓ DE LA AGENDA!", flush=True)
+                enviar_telegram(
+                    "🚨 *¡ATENCIÓN PEDRY! ¡LA AGENDA CAMBIÓ!* 🚨\n"
+                    "¡El widget ya no muestra el aviso de cierre!\n"
+                    f"[Enlace directo a la agenda]({WIDGET_URL})"
+                )
+            else:
+                print("Página en blanco o cargando. Omitiendo.", flush=True)
 
     except Exception as e:
-        print(f"Error durante el ciclo con iframe: {e}", flush=True)
+        print(f"Error durante el ciclo: {e}", flush=True)
         
     finally:
         if browser:
@@ -85,7 +80,7 @@ def revisar_citas():
                 pass
 
 def main():
-    print("=== MONITOR DE CITAS (SOPORTE IFRAME) ===", flush=True)
+    print("=== MONITOR DE CITAS DEFINITIVO ===", flush=True)
     print(f"Intervalo configurado: {CHECK_INTERVAL} segundos.", flush=True)
     
     while True:
